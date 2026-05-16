@@ -13,7 +13,7 @@ Inker is heading in its own direction — focusing on homelab integrations like 
 - **Screen Designer** — Drag & drop widget placement, snap guides, freehand drawing, auto-fit zoom for any resolution
 - **Built-in Widgets** — Clock, date, text, weather, countdown, days until, QR code, image, GitHub stars, battery, WiFi, device info
 - **Custom Widgets** — Connect to any JSON API or RSS feed (including local network sources), JavaScript transformations, grid layouts
-- **Plugins** — Coming soon — homelab-native integrations for server monitoring, smart home, network stats
+- **Plugins** — Grafana panel integration with dashboard picker, live preview, and section grid compositing. More homelab-native plugins coming soon!
 - **Playlists** — Rotate multiple screens on devices automatically
 - **Device Management** — Auto-provisioning, firmware 1.7.8 support, real-time status, logs
 - **BYOD Support** — Register any e-ink device manually with custom screen resolution
