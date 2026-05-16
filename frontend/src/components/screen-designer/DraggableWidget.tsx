@@ -37,6 +37,7 @@ interface DraggableWidgetProps {
   onRotate: (rotation: number) => void;
   onDelete: () => void;
   onDragStateChange?: (isDragging: boolean, activeGuides: ActiveGuides) => void;
+  onHoverChange?: (widgetId: number | null) => void;
 }
 
 type ResizeHandle = 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w';
@@ -56,6 +57,7 @@ export function DraggableWidget({
   onRotate,
   onDelete,
   onDragStateChange,
+  onHoverChange,
 }: DraggableWidgetProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
@@ -501,8 +503,14 @@ export function DraggableWidget({
       }}
       onClick={handleClick}
       onMouseDown={handleMouseDown}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
+      onMouseEnter={() => {
+        setIsHovered(true);
+        onHoverChange?.(widget.id);
+      }}
+      onMouseLeave={() => {
+        setIsHovered(false);
+        onHoverChange?.(null);
+      }}
       onKeyDown={handleKeyDown}
       tabIndex={isSelected ? 0 : -1}
     >

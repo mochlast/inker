@@ -48,6 +48,8 @@ export const DesignCanvas = forwardRef<DesignCanvasHandle, DesignCanvasProps>(fu
   const canvasRef = useRef<HTMLDivElement>(null);
   const widgetsContainerRef = useRef<HTMLDivElement>(null);
 
+  const [hoveredWidgetId, setHoveredWidgetId] = useState<number | null>(null);
+
   // Zoom state
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
@@ -890,6 +892,7 @@ export const DesignCanvas = forwardRef<DesignCanvasHandle, DesignCanvasProps>(fu
                       onRotate={(rotation) => onUpdateWidget(widget.id, { rotation })}
                       onDelete={() => onDeleteWidget(widget.id)}
                       onDragStateChange={handleWidgetDragStateChange}
+                      onHoverChange={(id) => setHoveredWidgetId(id)}
                     />
                   );
                 })}
@@ -913,13 +916,15 @@ export const DesignCanvas = forwardRef<DesignCanvasHandle, DesignCanvasProps>(fu
               </div>
             </div>
 
-            {/* Widget labels overlay - always visible above everything */}
+            {/* Widget labels overlay - visible on hover or selection */}
             <div className="absolute inset-0 overflow-visible pointer-events-none" style={{ zIndex: 1000 }}>
               {widgets.map((widget) => {
                 const template = getTemplate(widget.templateId);
                 if (!template) return null;
 
                 const isSelected = selectedWidgetId === widget.id;
+                const isHovered = hoveredWidgetId === widget.id;
+                const isVisible = isSelected || isHovered;
 
                 // Position label above widget, or below if near top edge
                 const labelAbove = widget.y >= 30;
@@ -928,10 +933,12 @@ export const DesignCanvas = forwardRef<DesignCanvasHandle, DesignCanvasProps>(fu
                 return (
                   <div
                     key={`label-${widget.id}`}
-                    className={`absolute px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap shadow-sm ${
+                    className={`absolute px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap shadow-sm transition-opacity duration-150 ${
+                      isVisible ? 'opacity-100' : 'opacity-0'
+                    } ${
                       isSelected
                         ? 'bg-accent text-text-inverse shadow-md'
-                        : 'bg-gray-700 text-white opacity-80'
+                        : 'bg-gray-700 text-white'
                     }`}
                     style={{
                       left: widget.x,
