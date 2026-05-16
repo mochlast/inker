@@ -29,7 +29,24 @@ Inker is heading in its own direction — focusing on homelab integrations like 
 |:-:|:-:|:-:|
 | ![Extensions](https://github.com/user-attachments/assets/534b5104-8f1c-4a42-8c58-f2cef74dbc92) | ![Custom data sources](https://github.com/user-attachments/assets/03ed0dc8-7ae0-44fa-ace7-890b5ec8f385) | ![Custom widgets](https://github.com/user-attachments/assets/0eb10812-568a-46db-b58e-7e82c19ea403) |
 
-## Quick start
+
+<div align="center">
+
+| Grafana Plugin |
+|:-:|
+| <img width="735" height="559" alt="image" src="https://github.com/user-attachments/assets/4312d7c6-7b99-45d6-bb27-5b0f902f60c9" /> |
+
+</div>
+
+| #1 Example Grafana | #2 Example Grafana |
+|:-:|:-:|
+|<img width="800" height="480" alt="image" src="https://github.com/user-attachments/assets/4073360a-470b-4fd2-ae4c-362e71b3467e" />|<img width="800" height="480" alt="image" src="https://github.com/user-attachments/assets/224994f6-27e4-41c0-9a0c-7b88598b6c22" />|
+
+
+
+
+
+## Quick start & Technical information
 
 ### Docker Run
 
