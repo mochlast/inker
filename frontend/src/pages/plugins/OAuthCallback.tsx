@@ -7,7 +7,7 @@ export function OAuthCallback() {
 
   useEffect(() => {
     if (connected && window.opener) {
-      window.opener.postMessage({ type: 'oauth-connected' }, '*');
+      window.opener.postMessage({ type: 'oauth-connected' }, window.location.origin);
       window.close();
     }
   }, [connected]);

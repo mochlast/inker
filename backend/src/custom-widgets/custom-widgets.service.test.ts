@@ -10,15 +10,18 @@ describe('CustomWidgetsService', () => {
   let service: CustomWidgetsService;
   let mockPrisma: ReturnType<typeof createMockPrisma>;
   let mockDataSourcesService: { getCachedData: ReturnType<typeof createMock> };
+  let mockEventsService: { notifyScreenDesignUpdate: ReturnType<typeof createMock> };
   let scriptExecutor: ScriptExecutorService;
 
   beforeEach(() => {
     mockPrisma = createMockPrisma();
     mockDataSourcesService = { getCachedData: createMock() };
+    mockEventsService = { notifyScreenDesignUpdate: createMock() };
     scriptExecutor = new ScriptExecutorService();
     service = new CustomWidgetsService(
       mockPrisma as any,
       mockDataSourcesService as any,
+      mockEventsService as any,
       scriptExecutor,
     );
   });
@@ -417,11 +420,29 @@ describe('CustomWidgetsService', () => {
 
     it('should delete and return success message', async () => {
       mockPrisma.customWidget.findUnique.mockResolvedValue({ id: 1, name: 'W' });
+      mockPrisma.screenWidget.findMany.mockResolvedValue([]);
       mockPrisma.customWidget.delete.mockResolvedValue({});
 
       const result = await service.remove(1);
       expect(result).toEqual({ message: 'Custom widget deleted successfully' });
       expect(mockPrisma.customWidget.delete.calls).toHaveLength(1);
+    });
+
+    it('should remove orphaned screen widgets and notify designs', async () => {
+      mockPrisma.customWidget.findUnique.mockResolvedValue({ id: 1, name: 'W' });
+      mockPrisma.screenWidget.findMany.mockResolvedValue([
+        { id: 10, screenDesignId: 5 },
+        { id: 11, screenDesignId: 5 },
+        { id: 12, screenDesignId: 8 },
+      ]);
+      mockPrisma.screenWidget.deleteMany.mockResolvedValue({ count: 3 });
+      mockEventsService.notifyScreenDesignUpdate.mockResolvedValue(0);
+      mockPrisma.customWidget.delete.mockResolvedValue({});
+
+      const result = await service.remove(1);
+      expect(result).toEqual({ message: 'Custom widget deleted successfully' });
+      expect(mockPrisma.screenWidget.deleteMany.calls).toHaveLength(1);
+      expect(mockEventsService.notifyScreenDesignUpdate.calls).toHaveLength(2);
     });
   });
 

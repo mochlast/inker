@@ -110,6 +110,7 @@ export class DefaultScreenService implements OnModuleInit {
       await sharp(dithered, {
         raw: { width: grayBuffer.info.width, height: grayBuffer.info.height, channels: 1 },
       })
+        .toColorspace('b-w')
         .png({ compressionLevel: 9 })
         .toFile(this.defaultScreenPath);
 
@@ -254,6 +255,7 @@ export class DefaultScreenService implements OnModuleInit {
     await sharp(dithered, {
       raw: { width: grayBuffer.info.width, height: grayBuffer.info.height, channels: 1 },
     })
+      .toColorspace('b-w')
       .png({ compressionLevel: 9 })
       .toFile(outputPath);
 

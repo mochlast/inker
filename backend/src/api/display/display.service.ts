@@ -199,7 +199,7 @@ export class DisplayService {
     const firmwareUrl = await this.getFirmwareUpdateUrl(device.firmwareVersion || undefined);
 
     // Default refresh rate (used for default screens or when no playlist)
-    const defaultRefreshRate = shouldRefreshImmediately ? 1 : device.refreshRate;
+    const defaultRefreshRate = device.refreshRate;
 
     // If no playlist or no screens in playlist, return the default welcome screen
     if (!device.playlist || !device.playlist.items || device.playlist.items.length === 0) {
@@ -313,14 +313,12 @@ export class DisplayService {
     const effectiveRefreshRate = this.getRefreshRateForScreen(
       currentScreen,
       effectiveDeviceRate,
-      shouldRefreshImmediately,
     );
 
     // Calculate the next refresh timestamp for minute-synchronized clock updates
     const nextRefreshAt = this.getNextRefreshTimestamp(
       currentScreen,
       effectiveDeviceRate,
-      shouldRefreshImmediately,
     );
 
     // Handle both regular screens and designed screens
@@ -396,6 +394,7 @@ export class DisplayService {
       };
     } else if (currentScreen.pluginInstance?.plugin) {
       // Plugin instance - render via plugin engine
+      // Use Date.now() so filename changes on every poll, forcing device to fetch fresh render
       const pluginInstance = currentScreen.pluginInstance;
       const timestamp = Date.now();
 
@@ -587,13 +586,7 @@ export class DisplayService {
   private getRefreshRateForScreen(
     currentScreen: any,
     deviceRefreshRate: number,
-    shouldRefreshImmediately: boolean,
   ): number {
-    // If refresh is pending, return 1 second to force immediate update
-    if (shouldRefreshImmediately) {
-      return 1;
-    }
-
     let refreshRate = deviceRefreshRate;
 
     // For screens with clock widgets, calculate exact seconds until next minute boundary
@@ -634,13 +627,7 @@ export class DisplayService {
   getNextRefreshTimestamp(
     currentScreen: any,
     deviceRefreshRate: number,
-    shouldRefreshImmediately: boolean,
   ): number | null {
-    // If refresh is pending, refresh immediately
-    if (shouldRefreshImmediately) {
-      return Date.now() + 1000; // 1 second from now
-    }
-
     let refreshMs = deviceRefreshRate * 1000;
 
     // For screens with clock widgets, synchronize to minute boundaries

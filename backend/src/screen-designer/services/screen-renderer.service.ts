@@ -53,6 +53,7 @@ export type RenderMode = 'device' | 'preview' | 'einkPreview';
 export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
   private readonly logger = new Logger(ScreenRendererService.name);
   private browser: Browser | null = null;
+  private browserLaunching: Promise<Browser> | null = null;
   private fontsBase64: Record<string, string> = {};
   private fontStyleTag: string = '';
 
@@ -165,7 +166,7 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
    * Get or create Puppeteer browser instance
    * Handles browser reconnection if the browser crashes or disconnects
    */
-  private async getBrowser(): Promise<Browser> {
+  async getBrowser(): Promise<Browser> {
     // Check if browser exists and is still connected
     if (this.browser) {
       try {
@@ -182,33 +183,46 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
     }
 
     if (!this.browser) {
-      this.logger.debug('Launching new Puppeteer browser instance');
-      this.browser = await puppeteer.launch({
-        headless: true,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--font-render-hinting=none',
-          '--disable-font-subpixel-positioning',
-          '--force-color-profile=srgb',
-          // Network hardening — reduce Chrome's attack surface
-          '--disable-background-networking',
-          '--disable-default-apps',
-          '--disable-extensions',
-          '--disable-sync',
-          '--disable-translate',
-          '--metrics-recording-only',
-          '--no-first-run',
-        ],
-      });
+      // Prevent race condition: if another call is already launching, wait for it
+      if (this.browserLaunching) {
+        return this.browserLaunching;
+      }
 
-      // Set up disconnect handler to reset browser reference
-      this.browser.on('disconnected', () => {
-        this.logger.warn('Puppeteer browser disconnected unexpectedly');
-        this.browser = null;
-      });
+      this.browserLaunching = (async () => {
+        this.logger.debug('Launching new Puppeteer browser instance');
+        this.browser = await puppeteer.launch({
+          headless: true,
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--font-render-hinting=none',
+            '--disable-font-subpixel-positioning',
+            '--force-color-profile=srgb',
+            // Network hardening — reduce Chrome's attack surface
+            '--disable-background-networking',
+            '--disable-default-apps',
+            '--disable-extensions',
+            '--disable-sync',
+            '--disable-translate',
+            '--metrics-recording-only',
+            '--no-first-run',
+          ],
+        });
+
+        // Set up disconnect handler to reset browser reference
+        this.browser.on('disconnected', () => {
+          this.logger.warn('Puppeteer browser disconnected unexpectedly');
+          this.browser = null;
+          this.browserLaunching = null;
+        });
+
+        this.browserLaunching = null;
+        return this.browser;
+      })();
+
+      return this.browserLaunching;
     }
     return this.browser;
   }
@@ -308,10 +322,7 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
     // 'einkPreview' mode applies dithering but no inversion (for admin preview)
     const shouldNegate = mode === 'device';
 
-    // Create Sharp instance from the composited screenshot for e-ink processing
-    const canvas = sharp(renderBuffer);
-
-    return this.applyEinkProcessing(canvas, width, height, shouldNegate);
+    return this.applyEinkProcessing(renderBuffer, width, height, shouldNegate);
   }
 
   /**
@@ -328,7 +339,7 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
    * @param negate - If true, invert colors (required for TRMNL e-ink devices)
    */
   async applyEinkProcessing(
-    canvas: Sharp,
+    inputBuffer: Buffer,
     width: number,
     height: number,
     negate: boolean,
@@ -337,7 +348,8 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
     const threshold = 140; // Higher threshold favors white
 
     // First get grayscale raw pixels for Floyd-Steinberg dithering
-    const grayBuffer = await canvas
+    // Create fresh Sharp instance each time — Sharp pipelines are consumed after .toBuffer()
+    const grayBuffer = await sharp(inputBuffer)
       .grayscale()
       .normalise()
       .raw()
@@ -348,8 +360,9 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
     // Apply Floyd-Steinberg dithering
     const ditheredBuffer = this.applyFloydSteinbergDithering(data, info.width, info.height, threshold);
 
-    // Output as standard 8-bit grayscale PNG (no palette mode)
+    // Output as standard 8-bit grayscale PNG (color_type=0)
     // Firmware 1.7.8 handles display color mapping — palette PNGs cause scrambled display
+    // Sharp outputs 1-channel raw as RGB by default, so we convert to grayscale colorspace
     let buffer = await sharp(ditheredBuffer, {
       raw: {
         width: info.width,
@@ -357,6 +370,7 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
         channels: 1,
       },
     })
+      .toColorspace('b-w')
       .png({ compressionLevel: 9 })
       .toBuffer();
 
@@ -374,8 +388,8 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
         `Screen too large (${buffer.length} bytes), scaling to ${newWidth}x${newHeight}`,
       );
 
-      // Re-render at smaller size
-      const scaledGray = await canvas
+      // Fresh Sharp instance from original buffer for each retry
+      const scaledGray = await sharp(inputBuffer)
         .resize(newWidth, newHeight)
         .grayscale()
         .normalise()
@@ -396,6 +410,7 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
           channels: 1,
         },
       })
+        .toColorspace('b-w')
         .png({ compressionLevel: 9 })
         .toBuffer();
     }
@@ -437,17 +452,21 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
         const error = oldPixel - newPixel;
 
         // Error diffusion: 7/16, 3/16, 5/16, 1/16
+        // Clamp after each addition to prevent error accumulation artifacts
         if (x + 1 < width) {
-          pixels[idx + 1] += (error * 7) / 16;
+          pixels[idx + 1] = Math.max(0, Math.min(255, pixels[idx + 1] + (error * 7) / 16));
         }
         if (x - 1 >= 0 && y + 1 < height) {
-          pixels[(y + 1) * width + (x - 1)] += (error * 3) / 16;
+          const i = (y + 1) * width + (x - 1);
+          pixels[i] = Math.max(0, Math.min(255, pixels[i] + (error * 3) / 16));
         }
         if (y + 1 < height) {
-          pixels[(y + 1) * width + x] += (error * 5) / 16;
+          const i = (y + 1) * width + x;
+          pixels[i] = Math.max(0, Math.min(255, pixels[i] + (error * 5) / 16));
         }
         if (x + 1 < width && y + 1 < height) {
-          pixels[(y + 1) * width + (x + 1)] += (error * 1) / 16;
+          const i = (y + 1) * width + (x + 1);
+          pixels[i] = Math.max(0, Math.min(255, pixels[i] + (error * 1) / 16));
         }
       }
     }

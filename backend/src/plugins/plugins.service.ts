@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import * as sharp from 'sharp';
 import { PrismaService } from '../prisma/prisma.service';
 import { PluginRendererService, PluginLayout } from './plugin-renderer.service';
 import { EncryptionService } from '../common/services/encryption.service';
@@ -34,7 +35,10 @@ export class PluginsService {
   async findAllPlugins() {
     return this.prisma.plugin.findMany({
       orderBy: [{ category: 'asc' }, { name: 'asc' }],
-      include: { _count: { select: { instances: true } } },
+      include: {
+        _count: { select: { instances: true } },
+        instances: { select: { id: true, settings: true }, orderBy: { id: 'asc' } },
+      },
     });
   }
 
@@ -44,7 +48,10 @@ export class PluginsService {
       include: { instances: true },
     });
     if (!plugin) throw new NotFoundException(`Plugin ${id} not found`);
-    return plugin;
+    return {
+      ...plugin,
+      instances: plugin.instances.map((i) => this.maskEncryptedSettings(i)),
+    };
   }
 
   async findPluginBySlug(slug: string) {
@@ -86,10 +93,11 @@ export class PluginsService {
   // ========================
 
   async findAllInstances() {
-    return this.prisma.pluginInstance.findMany({
+    const instances = await this.prisma.pluginInstance.findMany({
       include: { plugin: true },
       orderBy: { createdAt: 'desc' },
     });
+    return instances.map((i) => this.maskEncryptedSettings(i));
   }
 
   async findInstanceById(id: number) {
@@ -414,6 +422,87 @@ export class PluginsService {
     const settings = this.getDecryptedSettings(instance);
     const { width, height } = this.getDimensionsForLayout(layout);
 
+    // Grafana: screenshot the panel URL directly via Puppeteer
+    if (plugin.slug === 'grafana_panel' && settings.dashboard_uid && settings.panel_id) {
+      const conn = await this.getGrafanaConnection(instance);
+      if (conn.grafana_url && conn.api_key) {
+        const rw = Number(settings.screen_width) || width;
+        const rh = Number(settings.screen_height) || height;
+        const baseUrl = conn.grafana_url.replace(/\/+$/, '');
+        const from = settings.time_range || 'now-6h';
+        const panelId = String(settings.panel_id);
+        let panelUrl: string;
+        let evaluateScript: string | undefined;
+
+        // Script to strip all Grafana UI chrome
+        const stripChromeScript = `
+          // Hide dashboard controls (time picker, refresh, variables, links)
+          document.querySelectorAll('[data-testid*="dashboard controls"], [data-testid*="template variable"], [data-testid*="Dashboard link"], [data-testid="public-dashboard-footer"]').forEach(el => el.style.display = 'none');
+          // Hide all panel menu buttons (three-dot menus)
+          document.querySelectorAll('[data-testid*="Panel menu"]').forEach(el => el.style.display = 'none');
+          // Hide info icons in panel headers
+          document.querySelectorAll('[data-testid*="icon-info-circle"]').forEach(el => el.style.display = 'none');
+          document.body.style.overflow = 'hidden';
+        `;
+
+        if (panelId === 'full') {
+          panelUrl = `${baseUrl}/d/${settings.dashboard_uid}?orgId=1&from=${from}&to=now&theme=light&kiosk`;
+          evaluateScript = stripChromeScript;
+        } else if (panelId.startsWith('row-')) {
+          // Entire section: render each panel individually then compose into a grid
+          const rowIdNum = parseInt(panelId.replace('row-', ''), 10);
+          const dashResp = await fetch(`${baseUrl}/api/dashboards/uid/${settings.dashboard_uid}`, {
+            headers: { Authorization: `Bearer ${conn.api_key}`, Accept: 'application/json' },
+            signal: AbortSignal.timeout(10000),
+          });
+          if (!dashResp.ok) throw new Error(`Grafana returned ${dashResp.status}`);
+          const dashData = await dashResp.json();
+          const allPanels = dashData.dashboard?.panels || [];
+          const row = allPanels.find((p: any) => p.id === rowIdNum && p.type === 'row');
+          if (!row) throw new Error(`Row ${rowIdNum} not found`);
+
+          // Collect child panel IDs — they may be nested (collapsed row) or siblings (expanded row)
+          let childPanelIds: number[] = [];
+          if (row.panels?.length) {
+            // Collapsed row: panels are nested
+            childPanelIds = row.panels.map((p: any) => p.id);
+          } else {
+            // Expanded row: panels are siblings between this row and the next row
+            const rowIndex = allPanels.indexOf(row);
+            for (let i = rowIndex + 1; i < allPanels.length; i++) {
+              if (allPanels[i].type === 'row') break;
+              childPanelIds.push(allPanels[i].id);
+            }
+          }
+
+          if (childPanelIds.length === 0) throw new Error(`Row ${rowIdNum} has no panels`);
+          this.logger.log(`[GrafanaSectionGrid] Row "${row.title}" has ${childPanelIds.length} panels: [${childPanelIds.join(', ')}]`);
+          return this.renderGrafanaSectionGrid(baseUrl, settings.dashboard_uid, conn.api_key, childPanelIds, from, rw, rh, mode);
+        } else {
+          // Single panel
+          panelUrl = `${baseUrl}/d-solo/${settings.dashboard_uid}?orgId=1&panelId=${panelId}&from=${from}&to=now&width=${rw}&height=${rh}&theme=light`;
+          evaluateScript = `
+            document.querySelectorAll('span').forEach(span => {
+              if (/^Powered by$/i.test(span.textContent?.trim() || '')) {
+                const container = span.parentElement;
+                if (container) container.remove();
+              }
+            });
+            document.querySelectorAll('[data-testid*="icon-info-circle"]').forEach(el => el.style.display = 'none');
+          `;
+        }
+
+        return this.pluginRenderer.renderUrlToPng(
+          panelUrl,
+          { Authorization: `Bearer ${conn.api_key}` },
+          rw,
+          rh,
+          mode,
+          evaluateScript,
+        );
+      }
+    }
+
     // Fetch fresh data
     const locals = await this.fetchData(instanceId);
 
@@ -424,6 +513,109 @@ export class PluginsService {
     }
 
     return this.pluginRenderer.renderToPng(markup, locals, settings, width, height, mode);
+  }
+
+  /**
+   * Render a Grafana section by screenshotting each panel individually
+   * via /d-solo/ and compositing them into a grid that fills the target resolution.
+   */
+  private async renderGrafanaSectionGrid(
+    baseUrl: string,
+    dashboardUid: string,
+    apiKey: string,
+    panelIds: number[],
+    timeRange: string,
+    targetWidth: number,
+    targetHeight: number,
+    mode: 'device' | 'preview' | 'einkPreview',
+  ): Promise<Buffer> {
+    const count = panelIds.length;
+    if (count === 0) throw new Error('No panels in section');
+
+    // Calculate optimal grid that fills the target resolution with minimal waste.
+    // Prefer grids where cells are close to square and there are few empty cells.
+    const targetAspect = targetWidth / targetHeight;
+    let bestCols = 1;
+    let bestScore = Infinity;
+    for (let cols = 1; cols <= count; cols++) {
+      const rows = Math.ceil(count / cols);
+      const emptyCells = (cols * rows) - count;
+      const cellW = targetWidth / cols;
+      const cellH = targetHeight / rows;
+      const cellAspect = cellW / cellH;
+      // Penalize: deviation from square cells + wasted cells
+      const aspectPenalty = Math.abs(Math.log(cellAspect)); // 0 when square
+      const wastePenalty = emptyCells / count; // fraction of wasted cells
+      const score = aspectPenalty + wastePenalty * 2;
+      if (score < bestScore) {
+        bestScore = score;
+        bestCols = cols;
+      }
+    }
+    const cols = bestCols;
+    const rows = Math.ceil(count / cols);
+    const cellWidth = Math.floor(targetWidth / cols);
+    const cellHeight = Math.floor(targetHeight / rows);
+
+    this.logger.log(`[GrafanaSectionGrid] ${count} panels → ${cols}x${rows} grid, cell ${cellWidth}x${cellHeight}, target ${targetWidth}x${targetHeight}`);
+
+    // Screenshot panels with limited concurrency (max 4 parallel pages)
+    const browser = await this.pluginRenderer.screenRenderer.getBrowser();
+    const MAX_CONCURRENT = 4;
+    const panelBuffers: Buffer[] = [];
+    for (let i = 0; i < panelIds.length; i += MAX_CONCURRENT) {
+      const batch = panelIds.slice(i, i + MAX_CONCURRENT);
+      const batchResults = await Promise.all(
+        batch.map(async (panelId) => {
+          const page = await browser.newPage();
+        try {
+          await page.setViewport({ width: cellWidth, height: cellHeight, deviceScaleFactor: 1 });
+          await page.setExtraHTTPHeaders({ Authorization: `Bearer ${apiKey}` });
+          const url = `${baseUrl}/d-solo/${dashboardUid}?orgId=1&panelId=${panelId}&from=${timeRange}&to=now&width=${cellWidth}&height=${cellHeight}&theme=light`;
+          await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+          // Strip "Powered by Grafana" overlay and other chrome
+          await page.evaluate(() => {
+            // The "Powered by" overlay is a div with a span containing "Powered by" + a Grafana logo img
+            // It's positioned absolute with top/right. Find and remove it.
+            document.querySelectorAll('span').forEach(span => {
+              if (/^Powered by$/i.test(span.textContent?.trim() || '')) {
+                const container = span.parentElement;
+                if (container) container.remove();
+              }
+            });
+            // Also hide info icons in panel headers
+            document.querySelectorAll('[data-testid*="icon-info-circle"]').forEach(el => (el as HTMLElement).style.display = 'none');
+          });
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          const png = Buffer.from(await page.screenshot({ type: 'png' }));
+          // Resize to exact cell size
+          return sharp(png).resize(cellWidth, cellHeight, { fit: 'fill' }).png().toBuffer();
+        } finally {
+          await page.close();
+        }
+      }),
+    );
+      panelBuffers.push(...batchResults);
+    }
+
+    // Composite all panels into the grid
+    const composites: sharp.OverlayOptions[] = panelBuffers.map((buf, i) => ({
+      input: buf,
+      left: (i % cols) * cellWidth,
+      top: Math.floor(i / cols) * cellHeight,
+    }));
+
+    const result = await sharp({
+      create: { width: targetWidth, height: targetHeight, channels: 3, background: { r: 255, g: 255, b: 255 } },
+    })
+      .composite(composites)
+      .png()
+      .toBuffer();
+
+    if (mode === 'preview') return result;
+
+    const shouldNegate = mode === 'device';
+    return this.pluginRenderer.screenRenderer.applyEinkProcessing(result, targetWidth, targetHeight, shouldNegate);
   }
 
   private async renderPluginPlaceholder(plugin: any, width: number, height: number): Promise<Buffer> {
@@ -606,6 +798,148 @@ export class PluginsService {
         pluginSlug: plugin.slug,
       },
     }));
+  }
+
+  // ========================
+  // Grafana helpers
+  // ========================
+
+  /**
+   * Resolve Grafana connection settings for an instance.
+   * Child instances have parentInstanceId → fetch parent's credentials.
+   * Parent instances have credentials directly.
+   */
+  async getGrafanaConnection(instance: any): Promise<{ grafana_url: string; api_key: string }> {
+    const settings = this.getDecryptedSettings(instance);
+    // If this instance has its own connection (parent)
+    if (settings.grafana_url && settings.api_key) {
+      return { grafana_url: settings.grafana_url, api_key: settings.api_key };
+    }
+    // Child instance — resolve from parent
+    const parentId = (instance.settings as any)?.parentInstanceId;
+    if (parentId) {
+      const parent = await this.findInstanceById(parentId);
+      const parentSettings = this.getDecryptedSettings(parent);
+      return { grafana_url: parentSettings.grafana_url, api_key: parentSettings.api_key };
+    }
+    return { grafana_url: '', api_key: '' };
+  }
+
+  /**
+   * Get Grafana connection from a parent instance ID (for controller use).
+   */
+  async getGrafanaConnectionById(instanceId: number): Promise<{ grafana_url: string; api_key: string }> {
+    const instance = await this.findInstanceById(instanceId);
+    return this.getGrafanaConnection(instance);
+  }
+
+  // ========================
+  // Builtin Plugins
+  // ========================
+
+  async seedBuiltinPlugins(): Promise<void> {
+    const builtins = [this.grafanaPluginDefinition()];
+    for (const def of builtins) {
+      await this.prisma.plugin.upsert({
+        where: { slug: def.slug },
+        create: def,
+        update: {
+          dataTransform: def.dataTransform,
+          markupFull: def.markupFull,
+          settingsSchema: def.settingsSchema,
+          refreshInterval: def.refreshInterval,
+          description: def.description,
+          icon: def.icon,
+          version: def.version,
+        },
+      });
+    }
+    this.logger.log(`Seeded ${builtins.length} builtin plugin(s)`);
+  }
+
+  private grafanaPluginDefinition() {
+    return {
+      name: 'Grafana Panel',
+      slug: 'grafana_panel',
+      description: 'Display a Grafana dashboard panel on your e-ink screen. Requires the Grafana Image Renderer plugin.',
+      icon: 'grafana',
+      category: 'monitoring',
+      source: 'inker',
+      isBuiltin: true,
+      dataStrategy: 'polling',
+      refreshInterval: 300,
+      version: '1.0.0',
+
+      settingsSchema: [
+        {
+          key: 'grafana_url',
+          label: 'Grafana URL',
+          type: 'text',
+          required: true,
+          description: 'Base URL of your Grafana instance (e.g. http://localhost:3000)',
+        },
+        {
+          key: 'api_key',
+          label: 'API Key / Service Account Token',
+          type: 'password',
+          required: true,
+          encrypted: true,
+          description: 'Grafana API key or service account token with Viewer role',
+        },
+        {
+          key: 'dashboard_uid',
+          label: 'Dashboard UID',
+          type: 'text',
+          required: false,
+          description: 'Found in the dashboard URL: /d/<uid>/...',
+        },
+        {
+          key: 'panel_id',
+          label: 'Panel ID',
+          type: 'number',
+          required: false,
+          description: 'Found in panel URL parameter: viewPanel=<id>',
+        },
+        {
+          key: 'time_range',
+          label: 'Time Range',
+          type: 'select',
+          default: 'now-6h',
+          options: [
+            { label: 'Last 1 hour', value: 'now-1h' },
+            { label: 'Last 6 hours', value: 'now-6h' },
+            { label: 'Last 12 hours', value: 'now-12h' },
+            { label: 'Last 24 hours', value: 'now-24h' },
+            { label: 'Last 7 days', value: 'now-7d' },
+            { label: 'Last 30 days', value: 'now-30d' },
+          ],
+        },
+      ],
+
+      dataTransform: [
+        '// Rendering is handled by Puppeteer screenshot of Grafana panel URL',
+        'return { dashboard_uid: settings.dashboard_uid, panel_id: settings.panel_id };',
+      ].join('\n'),
+
+      markupFull: [
+        '<div class="view view--full">',
+        '  <div class="layout" style="padding:0; justify-content:center; align-items:center;">',
+        '    {% if image_base64 %}',
+        '      <img src="{{ image_base64 }}" style="width:800px; height:452px; object-fit:contain;" />',
+        '    {% else %}',
+        '      <div style="text-align:center; padding:32px;">',
+        '        <div class="title" style="font-size:24px;">Grafana Panel</div>',
+        '        <div class="label" style="margin-top:8px;">Configure your Grafana connection in plugin settings</div>',
+        '      </div>',
+        '    {% endif %}',
+        '  </div>',
+        '  <div class="title_bar">',
+        '    <span class="title">Grafana</span>',
+        '    <span class="instance">{{ dashboard_uid }} / panel {{ panel_id }}</span>',
+        '  </div>',
+        '</div>',
+      ].join('\n'),
+    };
   }
 
   // ========================

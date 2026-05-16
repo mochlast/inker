@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { DataSourcesService } from '../data-sources/data-sources.service';
+import { EventsService } from '../events/events.service';
 import { ScriptExecutorService } from './services/script-executor.service';
 import { CreateCustomWidgetDto } from './dto/create-custom-widget.dto';
 import { UpdateCustomWidgetDto } from './dto/update-custom-widget.dto';
@@ -29,6 +30,7 @@ export class CustomWidgetsService {
   constructor(
     private prisma: PrismaService,
     private dataSourcesService: DataSourcesService,
+    private eventsService: EventsService,
     private scriptExecutor: ScriptExecutorService,
   ) {}
 
@@ -162,6 +164,32 @@ export class CustomWidgetsService {
 
     if (!customWidget) {
       throw new NotFoundException('Custom widget not found');
+    }
+
+    // Find all screen widget instances that reference this custom widget
+    const orphanedWidgets = await this.prisma.screenWidget.findMany({
+      where: {
+        template: { name: 'custom-widget-base' },
+        config: { path: ['customWidgetId'], equals: id },
+      },
+      select: { id: true, screenDesignId: true },
+    });
+
+    // Delete orphaned screen widget instances
+    if (orphanedWidgets.length > 0) {
+      const widgetIds = orphanedWidgets.map(w => w.id);
+      await this.prisma.screenWidget.deleteMany({
+        where: { id: { in: widgetIds } },
+      });
+      this.logger.log(
+        `Removed ${orphanedWidgets.length} widget instance(s) from screen designs`,
+      );
+
+      // Notify affected screen designs to refresh devices
+      const screenDesignIds = [...new Set(orphanedWidgets.map(w => w.screenDesignId))];
+      for (const designId of screenDesignIds) {
+        await this.eventsService.notifyScreenDesignUpdate(designId);
+      }
     }
 
     await this.prisma.customWidget.delete({

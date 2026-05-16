@@ -1,10 +1,11 @@
-import { useCallback, useState } from 'react';
+import { type ReactNode, useCallback, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { MainLayout } from '../../components/layout';
 import { Button, LoadingSpinner, Modal } from '../../components/common';
 import { useApi, useMutation } from '../../hooks/useApi';
 import { config } from '../../config';
 import apiClient from '../../services/api';
+import { getPluginActions, type PluginAction } from '../../components/plugins/plugin-actions';
 
 interface Plugin {
   id: number;
@@ -29,9 +30,16 @@ interface PluginInstance {
   lastError?: string;
 }
 
+interface ActiveModal {
+  title: string;
+  size: 'sm' | 'md' | 'lg' | 'xl' | 'full';
+  content: ReactNode;
+}
+
 export function InstalledPlugins() {
   const navigate = useNavigate();
   const [deleteTarget, setDeleteTarget] = useState<PluginInstance | null>(null);
+  const [activeModal, setActiveModal] = useState<ActiveModal | null>(null);
 
   const fetchInstances = useCallback(
     () => apiClient.get<{ data: PluginInstance[] }>('/plugins/instances/all').then((res) => res.data.data),
@@ -91,6 +99,19 @@ export function InstalledPlugins() {
                 instance={instance}
                 onSettings={() => navigate(`/plugins/instances/${instance.id}`)}
                 onDelete={() => setDeleteTarget(instance)}
+                onAction={(action) => {
+                  if (action.navigateTo) {
+                    navigate(action.navigateTo(instance));
+                    return;
+                  }
+                  if (!action.renderModal) return;
+                  const closeModal = () => { setActiveModal(null); refetch(); };
+                  setActiveModal({
+                    title: action.modalTitle || action.label,
+                    size: action.modalSize || 'md',
+                    content: action.renderModal(instance, closeModal),
+                  });
+                }}
               />
             ))}
           </div>
@@ -129,6 +150,18 @@ export function InstalledPlugins() {
             </div>
           </Modal>
         )}
+
+        {/* Plugin Action Modal */}
+        {activeModal && (
+          <Modal
+            isOpen={true}
+            onClose={() => { setActiveModal(null); refetch(); }}
+            title={activeModal.title}
+            size={activeModal.size}
+          >
+            {activeModal.content}
+          </Modal>
+        )}
       </div>
     </MainLayout>
   );
@@ -138,10 +171,12 @@ interface InstanceCardProps {
   instance: PluginInstance;
   onSettings: () => void;
   onDelete: () => void;
+  onAction: (action: PluginAction) => void;
 }
 
-function InstanceCard({ instance, onSettings, onDelete }: InstanceCardProps) {
-  const previewUrl = `${config.apiUrl}/plugins/instances/${instance.id}/render?mode=preview`;
+function InstanceCard({ instance, onSettings, onDelete, onAction }: InstanceCardProps) {
+  const previewUrl = `${config.apiUrl}/plugins/instances/${instance.id}/render?mode=einkPreview`;
+  const actions = getPluginActions(instance.plugin.slug).filter(a => a.isVisible(instance));
 
   return (
     <div className="bg-bg-card rounded-xl shadow-theme-sm border border-border-light transition-all duration-200 hover:shadow-theme-lg flex flex-col">
@@ -187,16 +222,38 @@ function InstanceCard({ instance, onSettings, onDelete }: InstanceCardProps) {
 
       {/* Card Footer */}
       <div className="px-5 py-3 border-t border-border-light flex items-center gap-2">
-        <button
-          onClick={onSettings}
-          className="flex-1 inline-flex items-center justify-center px-3 py-2 rounded-lg text-sm font-medium bg-bg-muted text-text-secondary hover:bg-bg-accent hover:text-text-primary border border-border-light transition-colors"
-        >
-          <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
-          Settings
-        </button>
+        {actions.length > 0 ? (
+          <>
+            {actions.map((action) => (
+              <button
+                key={action.key}
+                onClick={() => onAction(action)}
+                className={`inline-flex items-center justify-center rounded-lg text-sm font-medium transition-colors ${
+                  action.iconOnly
+                    ? 'px-3 py-2 bg-bg-muted text-text-secondary hover:bg-bg-accent hover:text-text-primary border border-border-light'
+                    : action.variant === 'primary'
+                      ? 'flex-1 px-4 py-2 bg-accent text-white hover:opacity-90'
+                      : 'flex-1 px-3 py-2 bg-bg-muted text-text-secondary hover:bg-bg-accent hover:text-text-primary border border-border-light'
+                }`}
+                title={action.label}
+              >
+                {action.icon}
+                {!action.iconOnly && <span className="ml-1.5">{action.label}</span>}
+              </button>
+            ))}
+          </>
+        ) : (
+          <button
+            onClick={onSettings}
+            className="flex-1 inline-flex items-center justify-center px-3 py-2 rounded-lg text-sm font-medium bg-bg-muted text-text-secondary hover:bg-bg-accent hover:text-text-primary border border-border-light transition-colors"
+          >
+            <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            Settings
+          </button>
+        )}
         <button
           onClick={onDelete}
           className="inline-flex items-center justify-center px-3 py-2 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 border border-border-light transition-colors"

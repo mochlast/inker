@@ -42,12 +42,13 @@ async function bootstrap() {
       credentials: true,
     });
   } else {
-    // Default: allow same-origin requests only (match request host dynamically)
+    // Default: allow same-origin requests only
     app.enableCors({
       origin: (origin, callback) => {
         // Allow requests with no Origin header (same-origin, curl, devices)
         if (!origin) return callback(null, true);
-        callback(null, origin);
+        // Reject cross-origin requests when CORS_ORIGINS is not configured
+        callback(new Error('CORS not allowed'), false);
       },
       credentials: true,
     });
@@ -81,7 +82,7 @@ async function bootstrap() {
     const config = new DocumentBuilder()
       .setTitle('Inker API')
       .setDescription('API documentation for Inker e-ink device management server')
-      .setVersion('0.3.3')
+      .setVersion('0.4.0')
       .addBearerAuth()
       .addApiKey({ type: 'apiKey', name: 'X-Device-Key', in: 'header' }, 'device-key')
       .build();

@@ -18,6 +18,7 @@ export class PluginsModule implements OnModuleInit {
   async onModuleInit() {
     try {
       await this.pluginsService.cleanupStalePlugins();
+      await this.pluginsService.seedBuiltinPlugins();
     } catch {
       // Non-critical — skip if DB not ready
     }

@@ -122,52 +122,41 @@ describe('DisplayService', () => {
   });
 
   describe('getRefreshRateForScreen (private)', () => {
-    const getRate = (screen: any, deviceRate: number, immediate: boolean) =>
-      (service as any).getRefreshRateForScreen(screen, deviceRate, immediate);
-
-    it('should return 1 when shouldRefreshImmediately is true', () => {
-      expect(getRate({}, 900, true)).toBe(1);
-    });
+    const getRate = (screen: any, deviceRate: number) =>
+      (service as any).getRefreshRateForScreen(screen, deviceRate);
 
     it('should return device refresh rate for normal screens', () => {
       const screen = { screenDesign: { widgets: [{ template: { name: 'text' } }] } };
-      expect(getRate(screen, 900, false)).toBe(900);
+      expect(getRate(screen, 900)).toBe(900);
     });
 
     it('should return device refresh rate for countdown widgets (no override)', () => {
       const screen = { screenDesign: { widgets: [{ template: { name: 'countdown' } }] } };
-      expect(getRate(screen, 900, false)).toBe(900);
+      expect(getRate(screen, 900)).toBe(900);
     });
 
     it('should return device refresh rate for date widgets (not time-sensitive)', () => {
       const screen = { screenDesign: { widgets: [{ template: { name: 'date' } }] } };
-      expect(getRate(screen, 900, false)).toBe(900);
+      expect(getRate(screen, 900)).toBe(900);
     });
 
     it('should calculate clock refresh based on seconds until next minute', () => {
       const screen = { screenDesign: { widgets: [{ template: { name: 'clock' } }] } };
-      const rate = getRate(screen, 900, false);
+      const rate = getRate(screen, 900);
       expect(rate).toBeGreaterThanOrEqual(4);
       expect(rate).toBeLessThanOrEqual(63);
     });
 
     it('should enforce 10 second floor', () => {
       const screen = { screenDesign: { widgets: [{ template: { name: 'text' } }] } };
-      expect(getRate(screen, 5, false)).toBe(10);
+      expect(getRate(screen, 5)).toBe(10);
     });
   });
 
   describe('getNextRefreshTimestamp', () => {
-    it('should return ~1 second from now when immediate', () => {
-      const screen = {};
-      const ts = service.getNextRefreshTimestamp(screen, 900, true);
-      expect(ts).not.toBeNull();
-      expect(ts! - Date.now()).toBeLessThanOrEqual(2000);
-    });
-
     it('should return device refresh rate ms from now for normal screens', () => {
       const screen = { screenDesign: { widgets: [{ template: { name: 'text' } }] } };
-      const ts = service.getNextRefreshTimestamp(screen, 900, false);
+      const ts = service.getNextRefreshTimestamp(screen, 900);
       const diff = ts! - Date.now();
       // Should be approximately 900 seconds from now
       expect(diff).toBeGreaterThan(899000);
@@ -240,7 +229,7 @@ describe('DisplayService', () => {
       expect(result.reset_firmware).toBe(false);
     });
 
-    it('should return refresh_rate 1 when refreshPending is true', async () => {
+    it('should use normal refresh_rate even when refreshPending is true', async () => {
       mockPrisma.device.findFirst.mockResolvedValue({
         id: 1, name: 'Test', playlist: null, refreshRate: 900, refreshPending: true,
       });
@@ -248,7 +237,7 @@ describe('DisplayService', () => {
       mockPrisma.firmware.findFirst.mockResolvedValue(null);
 
       const result = await service.getDisplayContent('test-key', false, { battery: 80, wifi: -51 });
-      expect(result.refresh_rate).toBe(1);
+      expect(result.refresh_rate).toBe(900);
     });
 
     it('should update device metrics', async () => {

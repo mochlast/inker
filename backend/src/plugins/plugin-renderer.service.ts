@@ -239,8 +239,43 @@ ${innerHtml}
 
     // Apply e-ink processing (dithering + optional inversion)
     const shouldNegate = mode === 'device';
-    const canvas = sharp(rawPng);
-    return this.screenRenderer.applyEinkProcessing(canvas, width, height, shouldNegate);
+    return this.screenRenderer.applyEinkProcessing(rawPng, width, height, shouldNegate);
+  }
+
+  /**
+   * Screenshot an external URL with custom headers (e.g. Grafana panel with auth)
+   */
+  async renderUrlToPng(
+    url: string,
+    headers: Record<string, string>,
+    width: number = 800,
+    height: number = 480,
+    mode: 'device' | 'preview' | 'einkPreview' = 'device',
+    evaluateScript?: string,
+  ): Promise<Buffer> {
+    const browser = await this.screenRenderer.getBrowser();
+    const page = await browser.newPage();
+
+    try {
+      await page.setViewport({ width, height, deviceScaleFactor: 1 });
+      await page.setExtraHTTPHeaders(headers);
+      await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+
+      if (evaluateScript) {
+        await page.evaluate(evaluateScript);
+        // Wait for layout to settle after DOM changes
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+
+      const rawPng = Buffer.from(await page.screenshot({ type: 'png', fullPage: false }));
+
+      if (mode === 'preview') return rawPng;
+
+      const shouldNegate = mode === 'device';
+      return this.screenRenderer.applyEinkProcessing(rawPng, width, height, shouldNegate);
+    } finally {
+      await page.close();
+    }
   }
 
   /**

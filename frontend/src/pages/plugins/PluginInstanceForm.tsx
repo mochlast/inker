@@ -6,7 +6,7 @@ import { useApi, useMutation } from '../../hooks/useApi';
 import { useNotification } from '../../contexts/NotificationContext';
 
 import { config } from '../../config';
-import apiClient from '../../services/api';
+import apiClient, { pluginService } from '../../services/api';
 
 interface Plugin {
   id: number;
@@ -74,12 +74,17 @@ export function PluginInstanceForm() {
   // Initialize form values from instance settings
   useEffect(() => {
     if (instance) {
-      const schema = instance.plugin.settingsSchema || [];
-      const defaults: Record<string, any> = {};
-      for (const field of schema) {
-        defaults[field.key] = instance.settings[field.key] ?? field.default ?? '';
+      // For Grafana child instances, use actual settings directly (not schema defaults)
+      if (instance.plugin.slug === 'grafana_panel' && instance.settings?.parentInstanceId) {
+        setFormValues({ ...instance.settings });
+      } else {
+        const schema = instance.plugin.settingsSchema || [];
+        const defaults: Record<string, any> = {};
+        for (const field of schema) {
+          defaults[field.key] = instance.settings[field.key] ?? field.default ?? '';
+        }
+        setFormValues(defaults);
       }
-      setFormValues(defaults);
     }
   }, [instance]);
 
@@ -92,9 +97,10 @@ export function PluginInstanceForm() {
     }
   }, [formValues, instance, initialized]);
 
-  // Debounced auto-save + preview refresh on any settings change
+  // Debounced auto-save + preview refresh on any settings change (skip for Grafana — has own save logic)
+  const isGrafanaPlugin = instance?.plugin?.slug === 'grafana_panel';
   useEffect(() => {
-    if (!initialized) return;
+    if (!initialized || isGrafanaPlugin) return;
     const timer = setTimeout(() => {
       apiClient.put(`/plugins/instances/${id}`, { settings: formValues })
         .then(() => setPreviewTimestamp(Date.now()))
@@ -171,7 +177,8 @@ export function PluginInstanceForm() {
   }
 
   const schema = instance.plugin.settingsSchema || [];
-  const previewUrl = `${config.apiUrl}/plugins/instances/${id}/render?mode=preview&t=${previewTimestamp}`;
+  const previewUrl = `${config.apiUrl}/plugins/instances/${id}/render?mode=einkPreview&t=${previewTimestamp}`;
+  const isGrafanaParent = instance.plugin.slug === 'grafana_panel' && !instance.settings?.parentInstanceId;
 
   return (
     <MainLayout>
@@ -179,13 +186,17 @@ export function PluginInstanceForm() {
         {/* Back Button + Header */}
         <div>
           <button
-            onClick={() => navigate('/plugins')}
+            onClick={() => {
+              const from = searchParams.get('from');
+              if (from) navigate(from);
+              else navigate(-1);
+            }}
             className="inline-flex items-center text-sm text-text-muted hover:text-text-primary transition-colors mb-4"
           >
             <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
-            Back to Plugin Library
+            Back
           </button>
           <h1 className="text-3xl font-bold text-text-primary">{instance.plugin.name}</h1>
           {instance.name && (
@@ -220,9 +231,9 @@ export function PluginInstanceForm() {
         )}
 
         {/* Two-Column Layout */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className={`grid grid-cols-1 ${isGrafanaParent ? '' : 'lg:grid-cols-3'} gap-6`}>
           {/* Left: Settings Form */}
-          <div className="lg:col-span-2">
+          <div className={isGrafanaParent ? '' : 'lg:col-span-2'}>
             <div className="bg-bg-card rounded-xl shadow-theme-sm border border-border-light p-6">
               <h2 className="text-xl font-semibold text-text-primary mb-6">Settings</h2>
 
@@ -254,7 +265,19 @@ export function PluginInstanceForm() {
                 </div>
               )}
 
-              {schema.length === 0 ? (
+              {instance.plugin.slug === 'grafana_panel' ? (
+                <GrafanaSettings
+                  instanceId={instance.id}
+                  pluginId={instance.pluginId}
+                  formValues={formValues}
+                  onChange={handleFieldChange}
+                  onSave={handleSave}
+                  saving={saveMutation.isLoading}
+                  schema={schema}
+                  isChild={!!instance.settings?.parentInstanceId}
+                  parentInstanceId={instance.settings?.parentInstanceId}
+                />
+              ) : schema.length === 0 ? (
                 <p className="text-text-muted">This plugin has no configurable settings.</p>
               ) : (
                 <div className="space-y-5">
@@ -285,8 +308,8 @@ export function PluginInstanceForm() {
             </div>
           </div>
 
-          {/* Right: Preview + Info */}
-          <div className="space-y-6">
+          {/* Right: Preview + Info (hidden for Grafana parent) */}
+          {!isGrafanaParent && <div className="space-y-6">
             {/* Preview Panel */}
             <div className="bg-bg-card rounded-xl shadow-theme-sm border border-border-light p-4">
               <div className="flex items-center justify-between mb-4">
@@ -301,7 +324,7 @@ export function PluginInstanceForm() {
                   Refresh Preview
                 </button>
               </div>
-              <div className="bg-bg-muted rounded-lg overflow-hidden border border-border-light">
+              <div className="bg-bg-muted rounded-lg overflow-hidden border border-border-light cursor-pointer" onClick={() => window.open(previewUrl, '_blank')}>
                 <img
                   src={previewUrl}
                   alt="Plugin preview"
@@ -351,10 +374,572 @@ export function PluginInstanceForm() {
                 )}
               </dl>
             </div>
-          </div>
+          </div>}
         </div>
       </div>
     </MainLayout>
+  );
+}
+
+// ========================
+// Grafana dynamic settings
+// ========================
+
+interface GrafanaDashboard {
+  uid: string;
+  title: string;
+}
+
+interface GrafanaPanel {
+  id: number | string;
+  title: string;
+  type: string;
+  section: string | null;
+}
+
+interface GrafanaSettingsProps {
+  instanceId: number;
+  pluginId: number;
+  formValues: Record<string, any>;
+  onChange: (key: string, value: any) => void;
+  onSave: () => void;
+  saving: boolean;
+  schema: SettingsField[];
+  isChild: boolean;
+  parentInstanceId?: number;
+}
+
+function GrafanaSettings({ instanceId, pluginId, formValues, onChange, onSave, saving, schema, isChild, parentInstanceId }: GrafanaSettingsProps) {
+  if (isChild) {
+    return (
+      <GrafanaChildSettings
+        instanceId={instanceId}
+        parentInstanceId={parentInstanceId!}
+        formValues={formValues}
+        onChange={onChange}
+        onSave={onSave}
+        saving={saving}
+        schema={schema}
+      />
+    );
+  }
+
+  return (
+    <GrafanaParentSettings
+      instanceId={instanceId}
+      pluginId={pluginId}
+      formValues={formValues}
+      onChange={onChange}
+      onSave={onSave}
+      saving={saving}
+    />
+  );
+}
+
+/** Parent mode: connection settings + generate screen */
+function GrafanaParentSettings({ instanceId, formValues, onChange }: {
+  instanceId: number; pluginId: number;
+  formValues: Record<string, any>; onChange: (key: string, value: any) => void;
+  onSave: () => void; saving: boolean;
+}) {
+  const navigate = useNavigate();
+  const notification = useNotification();
+  const [dashboards, setDashboards] = useState<GrafanaDashboard[]>([]);
+  const [panels, setPanels] = useState<GrafanaPanel[]>([]);
+  const [loadingDashboards, setLoadingDashboards] = useState(false);
+  const [loadingPanels, setLoadingPanels] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState('');
+  const [screenDashboard, setScreenDashboard] = useState('');
+  const [screenPanel, setScreenPanel] = useState('');
+  const [screenTimeRange, setScreenTimeRange] = useState('now-6h');
+  const [screenWidth, setScreenWidth] = useState(800);
+  const [screenHeight, setScreenHeight] = useState(480);
+  const [screenName, setScreenName] = useState('');
+  const [childScreens, setChildScreens] = useState<any[]>([]);
+
+  const inputClasses =
+    'w-full px-3 py-2.5 rounded-lg border border-border-light bg-bg-input text-text-primary placeholder-text-placeholder focus:ring-2 focus:ring-accent/20 focus:border-accent transition-all';
+
+  const MASK = '••••••••';
+  const apiKeyIsSet = formValues.api_key === MASK;
+  const [editingApiKey, setEditingApiKey] = useState(false);
+  const canConnect = formValues.grafana_url && (apiKeyIsSet || (formValues.api_key && formValues.api_key !== MASK));
+  const hasConnection = dashboards.length > 0;
+
+  // Fetch child screens and clean up stale __preview__ instances
+  const fetchChildScreens = useCallback(async () => {
+    try {
+      const all = await pluginService.getAllInstances();
+      const children = all.filter((i: any) => i.settings?.parentInstanceId === instanceId);
+      // Clean up any stale __preview__ instances
+      for (const child of children) {
+        if (child.name === '__preview__') {
+          try { await pluginService.deleteInstance(child.id); } catch { /* ignore */ }
+        }
+      }
+      setChildScreens(children.filter((i: any) => i.name !== '__preview__'));
+    } catch { /* ignore */ }
+  }, [instanceId]);
+
+  useEffect(() => { fetchChildScreens(); }, [fetchChildScreens]);
+
+  const fetchDashboards = async () => {
+    // Save connection first
+    await apiClient.put(`/plugins/instances/${instanceId}`, { settings: formValues });
+    setLoadingDashboards(true);
+    setError('');
+    setDashboards([]);
+    setPanels([]);
+    try {
+      const resp = await apiClient.post('/plugins/grafana/dashboards', { instanceId });
+      const data = resp.data.data || resp.data;
+      setDashboards(data);
+      if (data.length === 0) setError('No dashboards found in Grafana');
+    } catch (e: any) {
+      setError(e.response?.data?.message || e.message || 'Failed to connect to Grafana');
+    } finally {
+      setLoadingDashboards(false);
+    }
+  };
+
+  const fetchPanels = async (uid: string) => {
+    if (!uid) { setPanels([]); return; }
+    setLoadingPanels(true);
+    setPanels([]);
+    try {
+      const resp = await apiClient.post('/plugins/grafana/panels', { instanceId, dashboard_uid: uid });
+      const data = resp.data.data || resp.data;
+      setPanels(data);
+    } catch (e: any) {
+      setError(e.response?.data?.message || 'Failed to load panels');
+    } finally {
+      setLoadingPanels(false);
+    }
+  };
+
+  const handleDashboardChange = (uid: string) => {
+    setScreenDashboard(uid);
+    setScreenPanel('');
+    fetchPanels(uid);
+  };
+
+  // Live preview: create a temporary child to preview, then generate for real
+  const [previewInstanceId, setPreviewInstanceId] = useState<number | null>(null);
+  const [previewTimestamp, setPreviewTimestamp] = useState(Date.now());
+  const [showGenerator, setShowGenerator] = useState(false);
+
+  // When panel selection changes, create/update a temp preview instance
+  useEffect(() => {
+    if (!screenDashboard || !screenPanel || !showGenerator) return;
+    const timer = setTimeout(async () => {
+      try {
+        if (previewInstanceId) {
+          // Update existing preview instance
+          await apiClient.put(`/plugins/instances/${previewInstanceId}`, {
+            settings: { parentInstanceId: instanceId, dashboard_uid: screenDashboard, panel_id: (screenPanel === 'full' || screenPanel.startsWith('row-') ? screenPanel : Number(screenPanel)), time_range: screenTimeRange, screen_width: screenWidth, screen_height: screenHeight },
+          });
+        } else {
+          // Create temp preview instance
+          const resp = await apiClient.post('/plugins/grafana/generate-screen', {
+            parentInstanceId: instanceId,
+            dashboard_uid: screenDashboard,
+            panel_id: (screenPanel === 'full' || screenPanel.startsWith('row-') ? screenPanel : Number(screenPanel)),
+            time_range: screenTimeRange,
+            screen_width: screenWidth,
+            screen_height: screenHeight,
+            name: '__preview__',
+          });
+          const data = resp.data.data || resp.data;
+          setPreviewInstanceId(data.id);
+        }
+        setPreviewTimestamp(Date.now());
+      } catch { /* ignore preview errors */ }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [screenDashboard, screenPanel, screenTimeRange, screenWidth, screenHeight, showGenerator]);
+
+  const handleGenerateScreenFinal = async () => {
+    if (!screenDashboard || !screenPanel) return;
+    setGenerating(true);
+    try {
+      const dashTitle = dashboards.find(d => d.uid === screenDashboard)?.title || '';
+      const panelTitle = panels.find(p => String(p.id) === screenPanel)?.title || '';
+      const finalName = screenName || `${dashTitle} — ${panelTitle}`;
+
+      if (previewInstanceId) {
+        // Rename the preview instance to finalize it
+        await apiClient.put(`/plugins/instances/${previewInstanceId}`, {
+          name: finalName,
+          settings: { parentInstanceId: instanceId, dashboard_uid: screenDashboard, panel_id: (screenPanel === 'full' || screenPanel.startsWith('row-') ? screenPanel : Number(screenPanel)), time_range: screenTimeRange, screen_width: screenWidth, screen_height: screenHeight },
+        });
+      } else {
+        await apiClient.post('/plugins/grafana/generate-screen', {
+          parentInstanceId: instanceId,
+          dashboard_uid: screenDashboard,
+          panel_id: (screenPanel === 'full' || screenPanel.startsWith('row-') ? screenPanel : Number(screenPanel)),
+          time_range: screenTimeRange,
+          screen_width: screenWidth,
+          screen_height: screenHeight,
+          name: finalName,
+        });
+      }
+      notification.success('Screen generated!');
+      navigate('/screens');
+    } catch (e: any) {
+      notification.error(e.response?.data?.message || 'Failed to generate screen');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleCancelGenerator = async () => {
+    // Delete the preview instance if it exists
+    if (previewInstanceId) {
+      try { await pluginService.deleteInstance(previewInstanceId); } catch { /* ignore */ }
+      setPreviewInstanceId(null);
+    }
+    setScreenDashboard('');
+    setScreenPanel('');
+    setScreenName('');
+    setPanels([]);
+    setShowGenerator(false);
+  };
+
+  return (
+    <div className="space-y-5">
+      {/* Connection settings */}
+      <div className="space-y-4">
+        <h3 className="text-sm font-semibold text-text-primary uppercase tracking-wider">Connection</h3>
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-1.5">
+            Grafana URL <span className="text-red-500">*</span>
+          </label>
+          <input type="text" value={formValues.grafana_url ?? ''} onChange={(e) => onChange('grafana_url', e.target.value)} className={inputClasses} placeholder="http://localhost:3000" />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-1.5">
+            API Key <span className="text-red-500">*</span>
+          </label>
+          {apiKeyIsSet && !editingApiKey ? (
+            <div className="flex items-center gap-2">
+              <div className={`${inputClasses} flex items-center gap-2 text-text-muted`}>
+                <svg className="w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+                API key is configured
+              </div>
+              <button onClick={() => { setEditingApiKey(true); onChange('api_key', ''); }}
+                className="shrink-0 px-3 py-2.5 rounded-lg text-sm font-medium border border-border-light text-text-secondary hover:bg-bg-muted transition-colors">
+                Change
+              </button>
+            </div>
+          ) : (
+            <input type="password" value={formValues.api_key === MASK ? '' : (formValues.api_key ?? '')} onChange={(e) => onChange('api_key', e.target.value)} className={inputClasses} placeholder="Enter API key" />
+          )}
+        </div>
+        <button onClick={fetchDashboards} disabled={!canConnect || loadingDashboards}
+          className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium bg-accent text-white hover:opacity-90 transition-opacity disabled:opacity-50">
+          {loadingDashboards ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2" /> :
+            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>}
+          {hasConnection ? 'Refresh Dashboards' : 'Connect to Grafana'}
+        </button>
+      </div>
+
+      {error && <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 rounded-lg p-3">{error}</div>}
+
+      {/* Generated screens list */}
+      {childScreens.length > 0 && (
+        <div className="space-y-3 pt-4 border-t border-border-light">
+          <h3 className="text-sm font-semibold text-text-primary uppercase tracking-wider">Generated Screens</h3>
+          {childScreens.map((child: any) => (
+            <div key={child.id} onClick={() => navigate(`/plugins/instances/${child.id}`)}
+              className="flex items-center justify-between p-3 rounded-lg border border-border-light bg-bg-muted hover:bg-bg-accent cursor-pointer transition-colors">
+              <div>
+                <p className="text-sm font-medium text-text-primary">{child.name || 'Grafana Screen'}</p>
+                <p className="text-xs text-text-muted">Panel {child.settings?.panel_id} — {child.settings?.time_range || 'now-6h'}</p>
+              </div>
+              <svg className="w-4 h-4 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Generate Screen button / section */}
+      {hasConnection && !showGenerator && (
+        <div className="pt-4 border-t border-border-light">
+          <button onClick={() => setShowGenerator(true)}
+            className="w-full inline-flex items-center justify-center px-4 py-3 rounded-lg text-sm font-medium bg-text-primary text-text-inverse hover:opacity-90 transition-opacity">
+            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+            Generate Screen
+          </button>
+        </div>
+      )}
+
+      {showGenerator && (
+        <div className="pt-4 border-t border-border-light space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-text-primary uppercase tracking-wider">New Screen</h3>
+            <button onClick={handleCancelGenerator} className="text-sm text-text-muted hover:text-text-primary transition-colors">Cancel</button>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Dashboard</label>
+            <select value={screenDashboard} onChange={(e) => handleDashboardChange(e.target.value)} className={inputClasses}>
+              <option value="">Choose a dashboard...</option>
+              {dashboards.map((d) => <option key={d.uid} value={d.uid}>{d.title}</option>)}
+            </select>
+          </div>
+
+          {loadingPanels && <div className="flex items-center gap-2 text-sm text-text-muted"><div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current" /> Loading panels...</div>}
+
+          {panels.length > 0 && (
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">Panel</label>
+              <PanelSelect panels={panels} value={screenPanel} onChange={setScreenPanel} className={inputClasses} />
+            </div>
+          )}
+
+          {screenPanel && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-1.5">Time Range</label>
+                <select value={screenTimeRange} onChange={(e) => setScreenTimeRange(e.target.value)} className={inputClasses}>
+                  <option value="now-5m">Last 5 minutes</option>
+                  <option value="now-15m">Last 15 minutes</option>
+                  <option value="now-30m">Last 30 minutes</option>
+                  <option value="now-1h">Last 1 hour</option>
+                  <option value="now-3h">Last 3 hours</option>
+                  <option value="now-6h">Last 6 hours</option>
+                  <option value="now-12h">Last 12 hours</option>
+                  <option value="now-24h">Last 24 hours</option>
+                  <option value="now-2d">Last 2 days</option>
+                  <option value="now-7d">Last 7 days</option>
+                  <option value="now-30d">Last 30 days</option>
+                  <option value="now-90d">Last 90 days</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-1.5">Resolution</label>
+                <div className="flex items-center gap-2">
+                  <input type="number" value={screenWidth} onChange={(e) => setScreenWidth(Number(e.target.value) || 800)} className={inputClasses} min={100} max={3840} />
+                  <span className="text-text-muted shrink-0">x</span>
+                  <input type="number" value={screenHeight} onChange={(e) => setScreenHeight(Number(e.target.value) || 480)} className={inputClasses} min={100} max={2160} />
+                  <span className="text-xs text-text-muted shrink-0">px</span>
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-1.5">Screen Name (optional)</label>
+                <input type="text" value={screenName} onChange={(e) => setScreenName(e.target.value)} className={inputClasses} placeholder="Auto-generated from dashboard/panel" />
+              </div>
+
+              {/* Live preview */}
+              {previewInstanceId && (
+                <GrafanaPreview instanceId={previewInstanceId} timestamp={previewTimestamp} />
+              )}
+
+              <button onClick={handleGenerateScreenFinal} disabled={generating}
+                className="w-full inline-flex items-center justify-center px-4 py-3 rounded-lg text-sm font-medium bg-text-primary text-text-inverse hover:opacity-90 transition-opacity disabled:opacity-50">
+                {generating ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2" /> :
+                  <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+                Save Screen
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Panel select with optgroup sections */
+function PanelSelect({ panels, value, onChange, className }: {
+  panels: GrafanaPanel[]; value: string; onChange: (v: string) => void; className: string;
+}) {
+  // Group panels by section
+  const sections = new Map<string, GrafanaPanel[]>();
+  const ungrouped: GrafanaPanel[] = [];
+
+  for (const p of panels) {
+    if (p.section) {
+      if (!sections.has(p.section)) sections.set(p.section, []);
+      sections.get(p.section)!.push(p);
+    } else {
+      ungrouped.push(p);
+    }
+  }
+
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} className={className}>
+      <option value="">Choose a panel...</option>
+      {ungrouped.map((p) => (
+        <option key={p.id} value={p.id}>{p.title}{p.type !== 'dashboard' ? ` (${p.type})` : ''}</option>
+      ))}
+      {Array.from(sections.entries()).map(([section, sectionPanels]) => (
+        <optgroup key={section} label={section}>
+          {sectionPanels.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.type === 'row' ? `▸ Entire section` : `${p.title} (${p.type})`}
+            </option>
+          ))}
+        </optgroup>
+      ))}
+    </select>
+  );
+}
+
+/** Preview with loading spinner */
+function GrafanaPreview({ instanceId, timestamp }: { instanceId: number; timestamp: number }) {
+  const [loading, setLoading] = useState(true);
+  const [hasError, setHasError] = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    setHasError(false);
+  }, [timestamp]);
+
+  return (
+    <div>
+      <label className="block text-sm font-medium text-text-primary mb-1.5">Preview</label>
+      <div className="bg-bg-muted rounded-lg overflow-hidden border border-border-light relative" style={{ minHeight: loading ? '200px' : undefined }}>
+        {loading && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-accent" />
+          </div>
+        )}
+        {!hasError && (
+          <img
+            src={`${config.apiUrl}/plugins/instances/${instanceId}/render?mode=einkPreview&t=${timestamp}`}
+            alt="Screen preview"
+            className={`w-full h-auto ${loading ? 'opacity-0' : 'opacity-100'} transition-opacity`}
+            onLoad={() => setLoading(false)}
+            onError={() => { setLoading(false); setHasError(true); }}
+          />
+        )}
+        {hasError && (
+          <div className="flex items-center justify-center py-8 text-sm text-text-muted">
+            Preview unavailable
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Child mode: edit dashboard/panel/time range for an existing screen */
+function GrafanaChildSettings({ parentInstanceId, formValues, onChange, onSave, saving }: {
+  instanceId: number; parentInstanceId: number;
+  formValues: Record<string, any>; onChange: (key: string, value: any) => void;
+  onSave: () => void; saving: boolean; schema: SettingsField[];
+}) {
+  const [dashboards, setDashboards] = useState<GrafanaDashboard[]>([]);
+  const [panels, setPanels] = useState<GrafanaPanel[]>([]);
+  const [loadingDashboards, setLoadingDashboards] = useState(false);
+  const [loadingPanels, setLoadingPanels] = useState(false);
+  const [error, setError] = useState('');
+
+  const inputClasses =
+    'w-full px-3 py-2.5 rounded-lg border border-border-light bg-bg-input text-text-primary placeholder-text-placeholder focus:ring-2 focus:ring-accent/20 focus:border-accent transition-all';
+
+  // Auto-load dashboards and panels on mount
+  const initialDashboardUid = formValues.dashboard_uid;
+  useEffect(() => {
+    (async () => {
+      setLoadingDashboards(true);
+      try {
+        const resp = await apiClient.post('/plugins/grafana/dashboards', { instanceId: parentInstanceId });
+        const data = resp.data.data || resp.data;
+        setDashboards(data);
+        // If we already have a dashboard selected, load its panels
+        if (initialDashboardUid) {
+          setLoadingPanels(true);
+          const pResp = await apiClient.post('/plugins/grafana/panels', { instanceId: parentInstanceId, dashboard_uid: initialDashboardUid });
+          setPanels(pResp.data.data || pResp.data);
+          setLoadingPanels(false);
+        }
+      } catch (e: any) {
+        setError(e.response?.data?.message || 'Failed to load from Grafana');
+      } finally {
+        setLoadingDashboards(false);
+      }
+    })();
+  }, [parentInstanceId, initialDashboardUid]);
+
+  const handleDashboardChange = async (uid: string) => {
+    onChange('dashboard_uid', uid);
+    onChange('panel_id', '');
+    if (!uid) { setPanels([]); return; }
+    setLoadingPanels(true);
+    try {
+      const resp = await apiClient.post('/plugins/grafana/panels', { instanceId: parentInstanceId, dashboard_uid: uid });
+      setPanels(resp.data.data || resp.data);
+    } catch (e: any) {
+      setError(e.response?.data?.message || 'Failed to load panels');
+    } finally {
+      setLoadingPanels(false);
+    }
+  };
+
+  return (
+    <div className="space-y-5">
+      {error && <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 rounded-lg p-3">{error}</div>}
+
+      <div>
+        <label className="block text-sm font-medium text-text-primary mb-1.5">Dashboard</label>
+        {loadingDashboards ? <div className="text-sm text-text-muted">Loading dashboards...</div> : (
+          <select value={formValues.dashboard_uid ?? ''} onChange={(e) => handleDashboardChange(e.target.value)} className={inputClasses}>
+            <option value="">Choose a dashboard...</option>
+            {dashboards.map((d) => <option key={d.uid} value={d.uid}>{d.title}</option>)}
+          </select>
+        )}
+      </div>
+
+      {loadingPanels && <div className="flex items-center gap-2 text-sm text-text-muted"><div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current" /> Loading panels...</div>}
+
+      {panels.length > 0 && (
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-1.5">Panel</label>
+          <PanelSelect panels={panels} value={String(formValues.panel_id ?? '')} onChange={(v) => {
+            const val = v.startsWith('row-') || v === 'full' ? v : (v ? Number(v) : '');
+            onChange('panel_id', val);
+          }} className={inputClasses} />
+        </div>
+      )}
+
+      <div>
+        <label className="block text-sm font-medium text-text-primary mb-1.5">Time Range</label>
+        <select value={formValues.time_range ?? 'now-6h'} onChange={(e) => onChange('time_range', e.target.value)} className={inputClasses}>
+                  <option value="now-5m">Last 5 minutes</option>
+                  <option value="now-15m">Last 15 minutes</option>
+                  <option value="now-30m">Last 30 minutes</option>
+                  <option value="now-1h">Last 1 hour</option>
+                  <option value="now-3h">Last 3 hours</option>
+                  <option value="now-6h">Last 6 hours</option>
+                  <option value="now-12h">Last 12 hours</option>
+                  <option value="now-24h">Last 24 hours</option>
+                  <option value="now-2d">Last 2 days</option>
+                  <option value="now-7d">Last 7 days</option>
+                  <option value="now-30d">Last 30 days</option>
+                  <option value="now-90d">Last 90 days</option>
+        </select>
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium text-text-primary mb-1.5">Resolution</label>
+        <div className="flex items-center gap-2">
+          <input type="number" value={formValues.screen_width ?? 800} onChange={(e) => onChange('screen_width', Number(e.target.value) || 800)} className={inputClasses} min={100} max={3840} />
+          <span className="text-text-muted shrink-0">x</span>
+          <input type="number" value={formValues.screen_height ?? 480} onChange={(e) => onChange('screen_height', Number(e.target.value) || 480)} className={inputClasses} min={100} max={2160} />
+          <span className="text-xs text-text-muted shrink-0">px</span>
+        </div>
+      </div>
+
+      <div className="pt-4 border-t border-border-light">
+        <Button onClick={onSave} disabled={saving}>
+          {saving ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2" /> :
+            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+          Save Settings
+        </Button>
+      </div>
+    </div>
   );
 }
 

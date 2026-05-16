@@ -277,7 +277,9 @@ export function PlaylistDetail() {
                       className="group flex items-center gap-4 p-4 rounded-xl bg-bg-muted border border-border-light hover:border-accent hover:shadow-lg hover:shadow-accent-light/50 transition-all cursor-pointer"
                       onClick={() => {
                         const screenId = String(screen.id);
-                        if (screenId.startsWith('design-')) {
+                        if (screenId.startsWith('plugin-')) {
+                          navigate(`/plugins/instances/${screenId.replace('plugin-', '')}?from=/playlists/${id}`);
+                        } else if (screenId.startsWith('design-')) {
                           navigate(`/screens/designer/${screenId.replace('design-', '')}?from=/playlists/${id}`);
                         } else {
                           navigate(`/screens/${screen.id}?from=/playlists/${id}`);

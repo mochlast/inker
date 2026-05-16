@@ -26,6 +26,7 @@ import { CustomWidgetForm, CustomWidgetPreview } from './pages/custom-widgets';
 import { Extensions } from './pages/extensions';
 // Plugin pages
 import { PluginLibrary, InstalledPlugins, PluginCreator, PluginInstanceForm, OAuthCallback } from './pages/plugins';
+import { GrafanaGeneratorPage } from './components/plugins/GrafanaGeneratorModal';
 
 /**
  * Main App component with routing
@@ -223,6 +224,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <PluginCreator />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/plugins/instances/:instanceId/generate"
+              element={
+                <ProtectedRoute>
+                  <GrafanaGeneratorPage />
                 </ProtectedRoute>
               }
             />

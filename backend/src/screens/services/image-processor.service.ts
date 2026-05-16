@@ -293,6 +293,7 @@ export class ImageProcessorService {
           channels: 1,
         },
       })
+        .toColorspace('b-w')
         .png({ compressionLevel: 9 })
         .toFile(outputPath);
 

@@ -926,7 +926,6 @@ export const DesignCanvas = forwardRef<DesignCanvasHandle, DesignCanvasProps>(fu
                 const isHovered = hoveredWidgetId === widget.id;
                 const isVisible = isSelected || isHovered;
 
-                // Position label above widget, or below if near top edge
                 const labelAbove = widget.y >= 30;
                 const labelTop = labelAbove ? widget.y - 24 : widget.y + widget.height + 4;
 

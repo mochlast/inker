@@ -5,7 +5,7 @@ import { Button, Card, GridSkeleton, Modal } from '../../components/common';
 import { ScreenDesignPreview } from '../../components/screen-designer/ScreenDesignPreview';
 import { useApi, useMutation } from '../../hooks/useApi';
 import { useInfiniteScroll } from '../../hooks';
-import { screenService, screenDesignerService, customWidgetService, dataSourceService } from '../../services/api';
+import { screenService, screenDesignerService, customWidgetService, dataSourceService, pluginService } from '../../services/api';
 import { useNotification } from '../../contexts/NotificationContext';
 
 const CUSTOM_WIDGET_TEMPLATE_OFFSET = 10000;
@@ -19,6 +19,8 @@ interface CombinedScreen {
   thumbnailUrl?: string;
   isDefault?: boolean;
   isDesigned: boolean;
+  isPlugin?: boolean;
+  pluginInstanceId?: number;
   createdAt?: string;
   // Full design data for preview (only for designed screens)
   design?: ScreenDesign;
@@ -108,6 +110,10 @@ export function ScreensList() {
     sentinelRef: designedSentinelRef,
   } = useInfiniteScroll<ScreenDesign>(designedScreensApi);
 
+  // Fetch plugin instances (shown as screens)
+  const fetchPluginInstances = useCallback(() => pluginService.getAllInstances(), []);
+  const { data: pluginInstances, refetch: refetchPlugins } = useApi<any[]>(fetchPluginInstances);
+
   // Fetch widget templates for preview rendering
   const { data: widgetTemplates } = useApi<WidgetTemplate[]>(
     () => screenDesignerService.getTemplates()
@@ -118,12 +124,15 @@ export function ScreensList() {
   useEffect(() => {
     refetchUploaded();
     refetchDesigned();
+    refetchPlugins();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- Refresh on navigation only
   }, [location.key]);
 
   const { mutate: deleteScreen, isLoading: isDeleting } = useMutation(
     async (screen: CombinedScreen) => {
-      if (screen.isDesigned) {
+      if (screen.isPlugin && screen.pluginInstanceId) {
+        return pluginService.deleteInstance(screen.pluginInstanceId);
+      } else if (screen.isDesigned) {
         const designId = String(screen.id).replace('design-', '');
         return screenDesignerService.delete(Number(designId));
       } else {
@@ -137,6 +146,7 @@ export function ScreensList() {
         setScreenToDelete(null);
         refetchUploaded();
         refetchDesigned();
+        refetchPlugins();
       },
     }
   );
@@ -145,7 +155,7 @@ export function ScreensList() {
   const isLoadingMore = isLoadingMoreUploaded || isLoadingMoreDesigned;
   const hasMore = hasMoreUploaded || hasMoreDesigned;
 
-  // Combine uploaded and designed screens
+  // Combine uploaded, designed, and plugin screens
   const combinedScreens: CombinedScreen[] = [
     // Map uploaded screens
     ...uploadedScreens.map((screen): CombinedScreen => ({
@@ -166,17 +176,29 @@ export function ScreensList() {
       isDefault: false,
       isDesigned: true,
       createdAt: design.createdAt,
-      design: design, // Include full design for preview rendering
+      design: design,
+    })),
+    // Map plugin instances as screens (only child instances with dashboard_uid — not parent connections)
+    ...(pluginInstances || []).filter((inst: any) => inst.settings?.dashboard_uid && inst.name !== '__preview__').map((inst: any): CombinedScreen => ({
+      id: `plugin-${inst.id}`,
+      name: inst.name || inst.plugin?.name || 'Plugin',
+      description: inst.plugin?.description,
+      thumbnailUrl: pluginService.getRenderUrl(inst.id, 'einkPreview'),
+      isDefault: false,
+      isDesigned: false,
+      isPlugin: true,
+      pluginInstanceId: inst.id,
+      createdAt: inst.createdAt,
     })),
   ].sort((a, b) => {
-    // Sort by createdAt descending (newest first)
     if (!a.createdAt || !b.createdAt) return 0;
     return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
   });
 
   const handleScreenClick = (screen: CombinedScreen) => {
-    if (screen.isDesigned) {
-      // Extract numeric ID from "design-123" format
+    if (screen.isPlugin && screen.pluginInstanceId) {
+      navigate(`/plugins/instances/${screen.pluginInstanceId}`);
+    } else if (screen.isDesigned) {
       const designId = String(screen.id).replace('design-', '');
       navigate(`/screens/designer/${designId}`);
     } else {
@@ -493,6 +515,11 @@ export function ScreensList() {
                       Designed
                     </span>
                   )}
+                  {screen.isPlugin && (
+                    <span className="absolute top-3 left-3 px-2 py-1 bg-orange-500 text-white text-xs font-medium rounded-md shadow">
+                      Plugin
+                    </span>
+                  )}
                   {/* Hover overlay */}
                   <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-end justify-center pb-4">
                     <span className="text-white text-sm font-medium flex items-center gap-1">
@@ -500,7 +527,7 @@ export function ScreensList() {
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                       </svg>
-                      {screen.isDesigned ? 'Edit Design' : 'View Details'}
+                      {screen.isPlugin ? 'Plugin Settings' : screen.isDesigned ? 'Edit Design' : 'View Details'}
                     </span>
                   </div>
                 </div>

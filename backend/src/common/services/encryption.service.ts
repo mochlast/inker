@@ -14,7 +14,20 @@ export class EncryptionService {
   private readonly key: Buffer;
 
   constructor(private readonly config: ConfigService) {
-    const secret = config.get<string>('encryption.key') || config.get<string>('admin.pin') || 'inker-default-key';
+    const encryptionKey = config.get<string>('encryption.key');
+    const adminPin = config.get<string>('admin.pin');
+    let secret: string;
+
+    if (encryptionKey) {
+      secret = encryptionKey;
+    } else if (adminPin && adminPin !== '1111') {
+      secret = adminPin;
+      this.logger.warn('ENCRYPTION_KEY not set — falling back to ADMIN_PIN. Set ENCRYPTION_KEY for stronger encryption.');
+    } else {
+      secret = 'inker-default-key';
+      this.logger.warn('ENCRYPTION_KEY not set and ADMIN_PIN is default — plugin secrets use weak encryption. Set ENCRYPTION_KEY env variable.');
+    }
+
     this.key = scryptSync(secret, SALT, KEY_LENGTH);
   }
 

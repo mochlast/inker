@@ -51,7 +51,8 @@ export class PlaylistsService {
       // Parse and categorize screen IDs to avoid N+1 queries
       const designIds: number[] = [];
       const regularIds: number[] = [];
-      const screenMap = new Map<string, { type: 'design' | 'regular'; id: number; order: number; duration: number }>();
+      const pluginIds: number[] = [];
+      const screenMap = new Map<string, { type: 'design' | 'regular' | 'plugin'; id: number; order: number; duration: number }>();
 
       screens.forEach((screenData, i) => {
         if (typeof screenData.screenId === 'string' && screenData.screenId.startsWith('design-')) {
@@ -66,6 +67,19 @@ export class PlaylistsService {
             });
           } else {
             this.logger.warn(`Invalid screen design ID: ${screenData.screenId}`);
+          }
+        } else if (typeof screenData.screenId === 'string' && screenData.screenId.startsWith('plugin-')) {
+          const pluginId = parseInt(screenData.screenId.replace('plugin-', ''), 10);
+          if (!isNaN(pluginId)) {
+            pluginIds.push(pluginId);
+            screenMap.set(screenData.screenId, {
+              type: 'plugin',
+              id: pluginId,
+              order: screenData.order ?? i,
+              duration: screenData.duration ?? 60,
+            });
+          } else {
+            this.logger.warn(`Invalid plugin instance ID: ${screenData.screenId}`);
           }
         } else {
           const screenId = typeof screenData.screenId === 'string'
@@ -85,25 +99,30 @@ export class PlaylistsService {
         }
       });
 
-      // Batch verify existence of all screens/designs
-      const [existingDesigns, existingScreens] = await Promise.all([
+      // Batch verify existence of all screens/designs/plugins
+      const [existingDesigns, existingScreens, existingPlugins] = await Promise.all([
         designIds.length > 0
           ? this.prisma.screenDesign.findMany({ where: { id: { in: designIds } }, select: { id: true } })
           : Promise.resolve([]),
         regularIds.length > 0
           ? this.prisma.screen.findMany({ where: { id: { in: regularIds } }, select: { id: true } })
           : Promise.resolve([]),
+        pluginIds.length > 0
+          ? this.prisma.pluginInstance.findMany({ where: { id: { in: pluginIds } }, select: { id: true } })
+          : Promise.resolve([]),
       ]);
 
       const existingDesignIds = new Set(existingDesigns.map((d) => d.id));
       const existingScreenIds = new Set(existingScreens.map((s) => s.id));
+      const existingPluginIds = new Set(existingPlugins.map((p) => p.id));
 
       // Build playlist items in a single transaction
       const itemsToCreate = screens
         .map((screenData, i) => {
-          const key = typeof screenData.screenId === 'string' && screenData.screenId.startsWith('design-')
-            ? screenData.screenId
-            : String(typeof screenData.screenId === 'string' ? parseInt(screenData.screenId, 10) : screenData.screenId);
+          const sid = screenData.screenId;
+          const key = typeof sid === 'string' && (sid.startsWith('design-') || sid.startsWith('plugin-'))
+            ? sid
+            : String(typeof sid === 'string' ? parseInt(sid, 10) : sid);
           const mapped = screenMap.get(key);
           if (!mapped) return null;
 
@@ -115,6 +134,17 @@ export class PlaylistsService {
             return {
               playlistId: playlist.id,
               screenDesignId: mapped.id,
+              order: mapped.order,
+              duration: mapped.duration,
+            };
+          } else if (mapped.type === 'plugin') {
+            if (!existingPluginIds.has(mapped.id)) {
+              this.logger.warn(`Plugin instance not found: ${mapped.id}`);
+              return null;
+            }
+            return {
+              playlistId: playlist.id,
+              pluginInstanceId: mapped.id,
               order: mapped.order,
               duration: mapped.duration,
             };
@@ -206,6 +236,9 @@ export class PlaylistsService {
               },
             },
             screenDesign: true,
+            pluginInstance: {
+              include: { plugin: true },
+            },
           },
           orderBy: {
             order: 'asc',
@@ -228,9 +261,24 @@ export class PlaylistsService {
     }
 
     // Transform items to screens array for frontend compatibility
-    const screens = playlist.items.map((item) => {
-      if (item.screenDesign) {
-        // Generate preview URL for designed screens (preview=true skips e-ink processing)
+    const screens = playlist.items.map((item: any) => {
+      if (item.pluginInstance) {
+        const previewUrl = `/api/plugins/instances/${item.pluginInstance.id}/render?mode=preview`;
+        return {
+          id: `plugin-${item.pluginInstance.id}`,
+          screenId: `plugin-${item.pluginInstance.id}`,
+          name: item.pluginInstance.name || item.pluginInstance.plugin?.name || 'Plugin',
+          description: item.pluginInstance.plugin?.description,
+          thumbnailUrl: previewUrl,
+          imageUrl: previewUrl,
+          duration: item.duration,
+          order: item.order,
+          isDesigned: false,
+          isPlugin: true,
+          width: Number(item.pluginInstance.settings?.screen_width) || 800,
+          height: Number(item.pluginInstance.settings?.screen_height) || 480,
+        };
+      } else if (item.screenDesign) {
         const previewUrl = `/api/device-images/design/${item.screenDesign.id}?preview=true`;
         return {
           id: `design-${item.screenDesign.id}`,
@@ -324,7 +372,8 @@ export class PlaylistsService {
         // Parse and categorize screen IDs
         const designIds: number[] = [];
         const regularIds: number[] = [];
-        const screenMap = new Map<string, { type: 'design' | 'regular'; id: number; order: number; duration: number }>();
+        const pluginIds: number[] = [];
+        const screenMap = new Map<string, { type: 'design' | 'regular' | 'plugin'; id: number; order: number; duration: number }>();
 
         screens.forEach((screenData, i) => {
           if (typeof screenData.screenId === 'string' && screenData.screenId.startsWith('design-')) {
@@ -339,6 +388,19 @@ export class PlaylistsService {
               });
             } else {
               this.logger.warn(`Invalid screen design ID: ${screenData.screenId}`);
+            }
+          } else if (typeof screenData.screenId === 'string' && screenData.screenId.startsWith('plugin-')) {
+            const pluginId = parseInt(screenData.screenId.replace('plugin-', ''), 10);
+            if (!isNaN(pluginId)) {
+              pluginIds.push(pluginId);
+              screenMap.set(screenData.screenId, {
+                type: 'plugin',
+                id: pluginId,
+                order: screenData.order ?? i,
+                duration: screenData.duration ?? 60,
+              });
+            } else {
+              this.logger.warn(`Invalid plugin instance ID: ${screenData.screenId}`);
             }
           } else {
             const screenId = typeof screenData.screenId === 'string'
@@ -358,25 +420,30 @@ export class PlaylistsService {
           }
         });
 
-        // Batch verify existence of all screens/designs
-        const [existingDesigns, existingScreens] = await Promise.all([
+        // Batch verify existence of all screens/designs/plugins
+        const [existingDesigns, existingScreens, existingPlugins] = await Promise.all([
           designIds.length > 0
             ? this.prisma.screenDesign.findMany({ where: { id: { in: designIds } }, select: { id: true } })
             : Promise.resolve([]),
           regularIds.length > 0
             ? this.prisma.screen.findMany({ where: { id: { in: regularIds } }, select: { id: true } })
             : Promise.resolve([]),
+          pluginIds.length > 0
+            ? this.prisma.pluginInstance.findMany({ where: { id: { in: pluginIds } }, select: { id: true } })
+            : Promise.resolve([]),
         ]);
 
         const existingDesignIds = new Set(existingDesigns.map((d) => d.id));
         const existingScreenIds = new Set(existingScreens.map((s) => s.id));
+        const existingPluginIds = new Set(existingPlugins.map((p) => p.id));
 
         // Build playlist items in a single batch
         const itemsToCreate = screens
           .map((screenData, i) => {
-            const key = typeof screenData.screenId === 'string' && screenData.screenId.startsWith('design-')
-              ? screenData.screenId
-              : String(typeof screenData.screenId === 'string' ? parseInt(screenData.screenId, 10) : screenData.screenId);
+            const sid = screenData.screenId;
+            const key = typeof sid === 'string' && (sid.startsWith('design-') || sid.startsWith('plugin-'))
+              ? sid
+              : String(typeof sid === 'string' ? parseInt(sid, 10) : sid);
             const mapped = screenMap.get(key);
             if (!mapped) return null;
 
@@ -388,6 +455,17 @@ export class PlaylistsService {
               return {
                 playlistId: id,
                 screenDesignId: mapped.id,
+                order: mapped.order,
+                duration: mapped.duration,
+              };
+            } else if (mapped.type === 'plugin') {
+              if (!existingPluginIds.has(mapped.id)) {
+                this.logger.warn(`Plugin instance not found: ${mapped.id}`);
+                return null;
+              }
+              return {
+                playlistId: id,
+                pluginInstanceId: mapped.id,
                 order: mapped.order,
                 duration: mapped.duration,
               };
@@ -419,6 +497,7 @@ export class PlaylistsService {
             include: {
               screen: true,
               screenDesign: true,
+              pluginInstance: { include: { plugin: true } },
             },
             orderBy: {
               order: 'asc',
@@ -432,9 +511,24 @@ export class PlaylistsService {
       }
 
       // Transform items to screens array
-      const transformedScreens = updatedPlaylistWithItems.items.map((item) => {
-        if (item.screenDesign) {
-          // Generate preview URL for designed screens (preview=true skips e-ink processing)
+      const transformedScreens = updatedPlaylistWithItems.items.map((item: any) => {
+        if (item.pluginInstance) {
+          const previewUrl = `/api/plugins/instances/${item.pluginInstance.id}/render?mode=preview`;
+          return {
+            id: `plugin-${item.pluginInstance.id}`,
+            screenId: `plugin-${item.pluginInstance.id}`,
+            name: item.pluginInstance.name || item.pluginInstance.plugin?.name || 'Plugin',
+            description: item.pluginInstance.plugin?.description,
+            thumbnailUrl: previewUrl,
+            imageUrl: previewUrl,
+            duration: item.duration,
+            order: item.order,
+            isDesigned: false,
+            isPlugin: true,
+            width: Number(item.pluginInstance.settings?.screen_width) || 800,
+            height: Number(item.pluginInstance.settings?.screen_height) || 480,
+          };
+        } else if (item.screenDesign) {
           const previewUrl = `/api/device-images/design/${item.screenDesign.id}?preview=true`;
           return {
             id: `design-${item.screenDesign.id}`,

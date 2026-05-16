@@ -685,6 +685,7 @@ export class ScreenDesignerController {
             channels: 1,
           },
         })
+          .toColorspace('b-w')
           .png({ compressionLevel: 9 })
           .toBuffer();
 
@@ -778,6 +779,7 @@ export class ScreenDesignerController {
         channels: 1,
       },
     })
+      .toColorspace('b-w')
       .png({ compressionLevel: 9 })
       .toBuffer();
   }

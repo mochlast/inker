@@ -4,7 +4,7 @@ import { MainLayout } from '../../components/layout';
 import { Button, Card, Input, LoadingSpinner, Select } from '../../components/common';
 import { ScreenDesignPreview } from '../../components/screen-designer/ScreenDesignPreview';
 import { useApi, useMutation } from '../../hooks/useApi';
-import { playlistService, screenService, screenDesignerService } from '../../services/api';
+import { playlistService, screenService, screenDesignerService, pluginService } from '../../services/api';
 import { config } from '../../config';
 import type { Playlist, PlaylistFormData, Screen, ScreenDesign, PlaylistScreen, PaginatedResponse, WidgetTemplate } from '../../types';
 
@@ -13,6 +13,7 @@ interface ScreenOption {
   id: string;
   name: string;
   isDesigned: boolean;
+  isPlugin?: boolean;
   thumbnailUrl?: string;
   design?: ScreenDesign;
   width?: number;
@@ -59,6 +60,10 @@ export function PlaylistForm() {
 
   const { data: designedScreensData } = useApi<PaginatedResponse<ScreenDesign>>(
     () => screenDesignerService.getAll(1, 100)
+  );
+
+  const { data: pluginInstancesData } = useApi<any[]>(
+    () => pluginService.getAllInstances()
   );
 
   const { data: templates } = useApi<WidgetTemplate[]>(
@@ -124,6 +129,17 @@ export function PlaylistForm() {
       width: design.width,
       height: design.height,
     })),
+    ...(pluginInstancesData || [])
+      .filter((inst: any) => inst.settings?.dashboard_uid && inst.name !== '__preview__')
+      .map((inst: any): ScreenOption => ({
+        id: `plugin-${inst.id}`,
+        name: `${inst.name || inst.plugin?.name || 'Plugin'} (Plugin)`,
+        isDesigned: false,
+        isPlugin: true,
+        thumbnailUrl: pluginService.getRenderUrl(inst.id, 'einkPreview'),
+        width: Number(inst.settings?.screen_width) || 800,
+        height: Number(inst.settings?.screen_height) || 480,
+      })),
   ];
 
   // Filter screens by required resolution (playlist screens or device)

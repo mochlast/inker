@@ -16,6 +16,7 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/public.decorator';
 import { PluginsService } from './plugins.service';
 import { OAuthService } from './oauth/oauth.service';
@@ -584,11 +585,89 @@ export class PluginsController {
 
   @Post('webhooks/:slug')
   @Public()
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @ApiOperation({ summary: 'Receive webhook data for a plugin' })
   async receiveWebhook(
     @Param('slug') slug: string,
     @Body() body: any,
   ) {
     return this.pluginsService.handleWebhook(slug, body);
+  }
+
+  // ========================
+  // Grafana proxy
+  // ========================
+
+  @Post('grafana/dashboards')
+  @ApiOperation({ summary: 'List Grafana dashboards via parent instance' })
+  async grafanaDashboards(@Body() body: { instanceId: number }) {
+    const conn = await this.pluginsService.getGrafanaConnectionById(body.instanceId);
+    if (!conn.grafana_url || !conn.api_key) throw new NotFoundException('Grafana connection not configured');
+    const baseUrl = conn.grafana_url.replace(/\/+$/, '');
+    const resp = await fetch(`${baseUrl}/api/search?limit=1000`, {
+      headers: { Authorization: `Bearer ${conn.api_key}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) throw new NotFoundException(`Grafana returned ${resp.status}: ${resp.statusText}`);
+    const results = await resp.json();
+    return results
+      .filter((d: any) => d.type === 'dash-db')
+      .map((d: any) => ({ uid: d.uid, title: d.folderTitle ? `${d.folderTitle} / ${d.title}` : d.title, uri: d.uri }));
+  }
+
+  @Post('grafana/panels')
+  @ApiOperation({ summary: 'List panels for a Grafana dashboard' })
+  async grafanaPanels(@Body() body: { instanceId: number; dashboard_uid: string }) {
+    const conn = await this.pluginsService.getGrafanaConnectionById(body.instanceId);
+    if (!conn.grafana_url || !conn.api_key) throw new NotFoundException('Grafana connection not configured');
+    const baseUrl = conn.grafana_url.replace(/\/+$/, '');
+    const resp = await fetch(`${baseUrl}/api/dashboards/uid/${body.dashboard_uid}`, {
+      headers: { Authorization: `Bearer ${conn.api_key}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) throw new NotFoundException(`Grafana returned ${resp.status}: ${resp.statusText}`);
+    const data = await resp.json();
+    const panels: { id: string | number; title: string; type: string; section: string | null }[] = [];
+    const extractPanels = (list: any[]) => {
+      for (const p of list || []) {
+        if (p.type === 'row') {
+          const rowTitle = p.title || `Row ${p.id}`;
+          panels.push({ id: `row-${p.id}`, title: `${rowTitle} (entire section)`, type: 'row', section: rowTitle });
+          for (const child of p.panels || []) {
+            panels.push({ id: child.id, title: child.title || `Panel ${child.id}`, type: child.type, section: rowTitle });
+          }
+        } else {
+          panels.push({ id: p.id, title: p.title || `Panel ${p.id}`, type: p.type, section: null });
+        }
+      }
+    };
+    extractPanels(data.dashboard?.panels);
+    return panels;
+  }
+
+  @Post('grafana/generate-screen')
+  @ApiOperation({ summary: 'Generate a Grafana screen (child instance)' })
+  async grafanaGenerateScreen(@Body() body: {
+    parentInstanceId: number;
+    dashboard_uid: string;
+    panel_id: number | string;
+    time_range?: string;
+    screen_width?: number;
+    screen_height?: number;
+    name?: string;
+  }) {
+    const parent = await this.pluginsService.findInstanceById(body.parentInstanceId);
+    return this.pluginsService.createInstance({
+      pluginId: parent.pluginId,
+      name: body.name || 'Grafana Screen',
+      settings: {
+        parentInstanceId: body.parentInstanceId,
+        dashboard_uid: body.dashboard_uid,
+        panel_id: body.panel_id,
+        time_range: body.time_range || 'now-6h',
+        screen_width: body.screen_width || 800,
+        screen_height: body.screen_height || 480,
+      },
+    });
   }
 }
