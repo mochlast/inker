@@ -149,16 +149,19 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
    * This ensures the loaded woff2 fonts are actually used
    */
   private mapFontFamily(fontFamily: string): string {
+    // 'Symbola' is a monochrome symbol/emoji font (installed in the image). It is
+    // listed as a per-glyph fallback so emoji render as black glyphs that survive
+    // the grayscale + Floyd-Steinberg dithering for e-ink (color emoji turn white).
     switch (fontFamily) {
       case 'sans-serif':
-        return "'Inter', sans-serif";
+        return "'Inter', 'Symbola', sans-serif";
       case 'monospace':
-        return "'Roboto Mono', monospace";
+        return "'Roboto Mono', 'Symbola', monospace";
       case 'serif':
-        return "'Merriweather', serif";
+        return "'Merriweather', 'Symbola', serif";
       default:
         // If already a specific font or unknown, return with fallback
-        return fontFamily.includes(',') ? fontFamily : `${fontFamily}, sans-serif`;
+        return fontFamily.includes(',') ? fontFamily : `${fontFamily}, 'Symbola', sans-serif`;
     }
   }
 
