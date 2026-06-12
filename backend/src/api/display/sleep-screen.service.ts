@@ -102,6 +102,22 @@ export class SleepScreenService {
   }
 
   /**
+   * Get the sleep screen as a PNG buffer (for the admin "Current Screen" preview).
+   */
+  async getSleepScreenBuffer(
+    width: number,
+    height: number,
+    wakeTime: string,
+  ): Promise<Buffer> {
+    const w = width > 0 ? width : this.DEFAULT_WIDTH;
+    const h = height > 0 ? height : this.DEFAULT_HEIGHT;
+    const filename = this.getFilename(w, h, wakeTime);
+    const outputPath = path.join(this.assetsDir, filename);
+    await this.getSleepScreen(w, h, wakeTime); // ensure generated
+    return sharp(outputPath).png().toBuffer();
+  }
+
+  /**
    * Generate the sleep screen image and write it to disk.
    */
   private async generate(

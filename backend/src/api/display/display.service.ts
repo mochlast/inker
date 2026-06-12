@@ -813,6 +813,18 @@ export class DisplayService {
       throw new NotFoundException('Device not found');
     }
 
+    // Reflect quiet hours in the preview: when the device is within its sleep
+    // window with a dedicated sleep screen, show that (it's what the device
+    // displays). Freeze mode keeps the current screen, which the path below
+    // already returns, so it needs no special handling here.
+    if (device.showSleepScreen && this.getQuietHoursSeconds(device) !== null) {
+      return this.sleepScreenService.getSleepScreenBuffer(
+        device.width,
+        device.height,
+        device.sleepStopAt as string,
+      );
+    }
+
     // If no playlist or no items, return default screen
     if (!device.playlist || !device.playlist.items || device.playlist.items.length === 0) {
       return this.defaultScreenService.getDefaultScreenPreviewBuffer();
