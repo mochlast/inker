@@ -31,6 +31,7 @@ describe('DisplayService', () => {
         filename: 'sleep-800x480-0700.png',
       }),
       getSleepScreenBase64: createMock().mockResolvedValue('base64sleep'),
+      getSleepScreenBuffer: createMock().mockResolvedValue(Buffer.from('SLEEPPNG')),
     };
     mockScreenRendererService = {
       renderScreenDesign: createMock().mockResolvedValue(Buffer.from('PNG')),
@@ -298,6 +299,23 @@ describe('DisplayService', () => {
       expect(mockScreenRendererService.renderScreenDesign.calls.length).toBe(1);
       // Second arg is deviceContext, third is preview=true
       expect(mockScreenRendererService.renderScreenDesign.calls[0][2]).toBe(true);
+    });
+
+    it('returns the sleep screen during quiet hours when showSleepScreen is true', async () => {
+      const hhmm = (offsetMin: number) => {
+        const now = new Date();
+        const total = ((now.getUTCHours() * 60 + now.getUTCMinutes() + offsetMin) % 1440 + 1440) % 1440;
+        return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+      };
+      mockPrisma.device.findUnique.mockResolvedValue({
+        id: 1, name: 'Test', width: 800, height: 480,
+        sleepStartAt: hhmm(-60), sleepStopAt: hhmm(120), showSleepScreen: true,
+        playlist: { items: [{ duration: 60, screenDesign: { id: 5, widgets: [] } }] },
+      });
+      const result = await service.getCurrentScreenImage(1);
+      expect(mockSleepScreenService.getSleepScreenBuffer.calls.length).toBe(1);
+      expect(mockScreenRendererService.renderScreenDesign.calls.length).toBe(0);
+      expect(result).toBeInstanceOf(Buffer);
     });
   });
 
